@@ -26,7 +26,6 @@ public:
 
 	void onResize(uint32_t width, uint32_t height) override;
 
-
 	void createShaderObjectAndLayout();
 
 	void onLastHeadlessFrame() override;
