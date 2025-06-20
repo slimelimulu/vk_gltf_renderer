@@ -59,30 +59,27 @@ namespace LBVH {
         }
     };
 
-    class LBVH {
-    private:
-        struct Element {
-            uint32_t primitiveIdx;
-            AABB aabb;
-        };
-
-        struct LBVHNode {
-            int32_t left;
-            int32_t right;
-            uint32_t primitiveIdx;
-            AABB aabb;
-        };
-
-        struct MortonCodeElement {
-            uint32_t mortonCode; // Äª¶ÙÂë
-            uint32_t elememtIdx; // ÔªËØË÷Òý
-        };
-
-        struct LBVHConstructionInfo {
-            uint32_t parent;
-            int32_t visitationCount; // for cas?
-        };
-
+    struct Element {
+        uint32_t primitiveIdx;
+        AABB aabb;
     };
+
+    struct LBVHNode {
+        int32_t left;
+        int32_t right;
+        uint32_t primitiveIdx;
+        AABB aabb;
+    };
+
+    struct MortonCodeElement {
+        uint32_t mortonCode; // Äª¶ÙÂë
+        uint32_t elememtIdx; // ÔªËØË÷Òý
+    };
+
+    struct LBVHConstructionInfo {
+        uint32_t parent;
+        int32_t visitationCount; // for cas?
+    };
+
 
 }
