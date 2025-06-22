@@ -1,9 +1,7 @@
 #include<glm/glm.hpp>
 #include<iostream>
-
-
-
-namespace LBVH {
+#include "../scene.hpp "
+/*
     struct AABB {
         glm::vec3 min = glm::vec3(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
         glm::vec3 max = glm::vec3(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
@@ -59,16 +57,22 @@ namespace LBVH {
         }
     };
 
+
+*/
+
+
+namespace LBVH {
+
     struct Element {
         uint32_t primitiveIdx;
-        AABB aabb;
+        nvh::Bbox aabb;
     };
 
     struct LBVHNode {
         int32_t left;
         int32_t right;
         uint32_t primitiveIdx;
-        AABB aabb;
+        nvh::Bbox aabb;
     };
 
     struct MortonCodeElement {
