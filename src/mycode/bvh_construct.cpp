@@ -1,3 +1,10 @@
+
+#include <thread>
+
+#if defined(WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 #define VMA_IMPLEMENTATION
 #include "nvvk/descriptorsets_vk.hpp"               // Descriptor set helper
 #include "nvvkhl/alloc_vma.hpp"                     // Our allocator
@@ -10,13 +17,36 @@
 #include "nvvk/extensions_vk.hpp"
 #include "LBVH.h"
 #include "tiny_gltf.h"
+#include "nvvkhl/element_camera.hpp"
+// ImGui headers
+#include "imgui/imgui_axis.hpp"
+#include "imgui/imgui_camera_widget.h"
+#include "imgui/imgui_helper.h"
 
-// shaders
-const std::vector<uint32_t> mc_comp_shd{};
-std::string g_inFilename;
+// Application specific headers
+#include "../busy_window.hpp"
+#include "../renderer.hpp"
+#include "../scene.hpp"
+#include "../settings.hpp"
+#include "../utilities.hpp"
+#include "stb_image.h"
+// #include "doc/app_icon_png.h"
+#include "../collapsing_header_manager.h"
+#include "perproject_globals.hpp"
+#include "nvvk/nsight_aftermath_vk.hpp"
+#include "../imgui_mouse_state.hpp"
+
+std::shared_ptr<nvvkhl::ElementCamera> g_elemCamera;
 std::shared_ptr<nvvkhl::SampleAppLog>     g_elemLogger;
 namespace LBVH {
+	// shaders
+	const std::vector<uint32_t> mc_comp_shd{};
+	std::string g_inFilename;
+	//std::shared_ptr<nvvkhl::ElementCamera>    g_elemCamera;    // The camera element (UI and movement)
+	
+	using namespace gltfr;
 	class ConstructBVH : public nvvkhl::IAppElement {
+		
 	public:
 		ConstructBVH() = default;
 		~ConstructBVH() override = default;
@@ -37,11 +67,19 @@ namespace LBVH {
 
 		void onLastHeadlessFrame() override;
 
+		void initPushConstants();
+
+		void  generateElements(nvh::Bbox& extent);
+
 	private:
 		nvvkhl::Application* m_app = nullptr;
 		std::unique_ptr<nvvkhl::AllocVma> m_alloc;
 		std::unique_ptr<nvvk::DescriptorSetContainer> m_dset;
 		std::array<VkShaderEXT, 1> m_shaders = {};
+		std::vector<Element> m_elements;
+
+		Resources   m_resources;
+		Scene       m_scene;
 
 	};
 	// push constants
@@ -61,83 +99,49 @@ namespace LBVH {
 		uint32_t g_num_elements;
 	};
 
-
-
-
-
-
 }
 
-int main(int argc, char** argv) {
-	nvvkhl::ApplicationCreateInfo appInfo;
-
-	nvh::CommandLineParser cli(PROJECT_NAME);
-	cli.addArgument({ "--headless" }, &appInfo.headless, "Run in headless mode");
-	cli.addArgument({ "--frames" }, &appInfo.headlessFrameCount, "Number of frames to render in headless mode");
-	cli.parse(argc, argv);
-
-	// Extension feature needed.
-	VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjFeature{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT };
-	// Setting up how Vulkan context must be created
-	VkContextSettings vkSetup;
-	if (!appInfo.headless)
-	{
-		nvvkhl::addSurfaceExtensions(vkSetup.instanceExtensions);  // WIN32, XLIB, ...
-		vkSetup.deviceExtensions.push_back({ VK_KHR_SWAPCHAIN_EXTENSION_NAME });
-	}
-	vkSetup.instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-	vkSetup.deviceExtensions.push_back({ VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME });
-	vkSetup.deviceExtensions.push_back({ VK_EXT_SHADER_OBJECT_EXTENSION_NAME, &shaderObjFeature });
-
-	// Create the Vulkan context
-	auto vkContext = std::make_unique<VulkanContext>(vkSetup);
-	load_VK_EXTENSIONS(vkContext->getInstance(), vkGetInstanceProcAddr, vkContext->getDevice(), vkGetDeviceProcAddr);  // Loading the Vulkan extension pointers
-	if (!vkContext->isValid())
-		std::exit(0);
-
-	// Setting up how the the application must be created
-	appInfo.name = "LBVH_Construction";
-	appInfo.useMenu = false;
-	appInfo.instance = vkContext->getInstance();
-	appInfo.device = vkContext->getDevice();
-	appInfo.physicalDevice = vkContext->getPhysicalDevice();
-	appInfo.queues = vkContext->getQueueInfos();
-
-	auto app = std::make_unique<nvvkhl::Application>(appInfo);                    // Create the application
-	auto test = std::make_shared<nvvkhl::ElementBenchmarkParameters>(argc, argv);  // Create the test framework
-	app->addElement(test);                                                         // Add the test element (--test ...)
-	app->addElement(std::make_shared<LBVH::ConstructBVH>());                       // Add our sample to the application
-	app->run();  // Loop infinitely, and call IAppElement virtual functions at each frame
-
-	app.reset();  // Clean up
-	//vkContext.deinit();
-	vkContext.reset();
-
-	return test->errorCode();
-
-
-
-}
 
 namespace LBVH {
 	void ConstructBVH::onAttach(nvvkhl::Application* app) {
 		m_app = app;
-		m_alloc = std::make_unique<nvvkhl::AllocVma>(VmaAllocatorCreateInfo{
-			.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
-			.physicalDevice = app->getPhysicalDevice(),
-			.device = app->getDevice(),
-			.instance = app->getInstance(),
-			});  // Allocator
-		m_dset = std::make_unique<nvvk::DescriptorSetContainer>(m_app->getDevice());
+		// Getting all required resources
+		gltfr::VulkanInfo ctx;
+		ctx.device = app->getDevice();
+		ctx.physicalDevice = app->getPhysicalDevice();
+		ctx.GCT0 = { app->getQueue(0).queue, app->getQueue(0).familyIndex };  // See creation of queues in main()
+		ctx.compute = { app->getQueue(1).queue, app->getQueue(1).familyIndex };
+		ctx.transfer = { app->getQueue(2).queue, app->getQueue(2).familyIndex };
 
-		createShaderObjectAndLayout();
+		m_resources.init(ctx);
+		m_scene.init(m_resources);
+
+		nvvk::ResourceAllocator* alloc = m_resources.m_allocator.get();
+		uint32_t                 c_queue_index = ctx.compute.familyIndex;
+		if (g_inFilename.empty()) {
+			g_inFilename = "E:\\gltf_models\\glTF-Sample-Models-main\\2.0\\SimpleMeshes\\glTF\\SimpleMeshes.gltf";
+		}
+
+		if (!g_inFilename.empty()) {
+			m_scene.load(m_resources, g_inFilename);
+		}
+
+		// createShaderObjectAndLayout();
+
+		// push constant
+		initPushConstants();
+		
 	
 	}
 
-	nvh::Bbox generateElements(const tinygltf::Model& model, std::vector<Element>& element, nvh::Bbox* extent) {
+
+	// --------------------------------------------------
+	// 将所有三角形的AABB添加到m_elements中，并计算出总的AABB
+	void ConstructBVH::generateElements(nvh::Bbox& extent) {
 		// fetch vertices from model
 		// https://github.com/KhronosGroup/glTF-Tutorials/blob/main/gltfTutorial/README.md
 		// 参考scene.cpp - 656
+		const tinygltf::Model& model = m_scene.m_gltfScene->getModel();
 		glm::vec3 minVal = { -1., -1., -1. };
 		glm::vec3 maxVal = { 1., 1., 1. };
 		for (const tinygltf::Accessor& accessor : model.accessors) {
@@ -158,9 +162,20 @@ namespace LBVH {
 				maxVal = glm::max(maxVal, localmax);
 			}
 		}
-		return nvh::Bbox{ minVal, maxVal };
+		extent = nvh::Bbox{ minVal, maxVal };
 
 	}
+
+	//--------------------------------------------------
+	// 初始化push constants
+	void ConstructBVH::initPushConstants() {
+		nvh::Bbox scene_bbox;
+		m_elements.clear();
+		generateElements(scene_bbox);
+		exit(0);
+	}
+
+
 	// --------------------------------------------------
 	// 创建：descriptor set layout, push_constant_range, 
 	// shader, 
@@ -198,6 +213,24 @@ namespace LBVH {
 		NVVK_CHECK(vkCreateShadersEXT(m_app->getDevice(), 1, shaderCreateInfos.data(), NULL, m_shaders.data()));
 
 	}
+
+	void ConstructBVH::onDetach() {
+
+	}
+	void ConstructBVH::onUIRender() {
+
+	}
+	void ConstructBVH::onUIMenu() {
+
+	}
+	void ConstructBVH::onResize(uint32_t width, uint32_t height) {
+
+	}
+	void ConstructBVH::onLastHeadlessFrame() {
+
+	}
+	void ConstructBVH::onRender(VkCommandBuffer cmd) {
+	}
 }
 
 
@@ -208,7 +241,7 @@ int main(int argc, char** argv) {
 	appInfo.vSync = false;
 
 	nvh::CommandLineParser cli(appInfo.name);
-	cli.addFilename(".gltf", &g_inFilename, "Load GLTF | GLB files");
+	cli.addFilename(".gltf", &LBVH::g_inFilename, "Load GLTF | GLB files");
 
 	// 使用logger
 	g_elemLogger = std::make_shared<nvvkhl::SampleAppLog>();
@@ -220,6 +253,26 @@ int main(int argc, char** argv) {
 	nvvkhl::addSurfaceExtensions(vkSetup.instanceExtensions);
 	vkSetup.deviceExtensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 	vkSetup.instanceExtensions.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+	// All Vulkan extensions required by the sample
+	VkPhysicalDeviceAccelerationStructureFeaturesKHR accel_feature{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+	VkPhysicalDeviceRayTracingPipelineFeaturesKHR rt_pipeline_feature{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR };
+	VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
+	VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR baryFeatures{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR };
+	VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjFeature{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT };
+	VkPhysicalDeviceNestedCommandBufferFeaturesEXT nestedCmdFeature{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NESTED_COMMAND_BUFFER_FEATURES_EXT };
+	VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV reorderFeature{
+		VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV };
+	vkSetup.deviceExtensions.emplace_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, &accel_feature);
+	vkSetup.deviceExtensions.emplace_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, &rt_pipeline_feature);
+	vkSetup.deviceExtensions.emplace_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+	vkSetup.deviceExtensions.emplace_back(VK_KHR_RAY_QUERY_EXTENSION_NAME, &ray_query_features);
+	vkSetup.deviceExtensions.emplace_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+	vkSetup.deviceExtensions.emplace_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, &baryFeatures, false);
+	vkSetup.deviceExtensions.emplace_back(VK_EXT_SHADER_OBJECT_EXTENSION_NAME, &shaderObjFeature);
+	vkSetup.deviceExtensions.emplace_back(VK_EXT_NESTED_COMMAND_BUFFER_EXTENSION_NAME, &nestedCmdFeature);
+	vkSetup.deviceExtensions.emplace_back(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, &reorderFeature, false);
+
 	// Request the creation of all needed queues
 	vkSetup.queues = { VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT,  // GTC for rendering
 					  VK_QUEUE_COMPUTE_BIT,                                                  // Compute
@@ -262,10 +315,10 @@ int main(int argc, char** argv) {
 	auto bvhConstructor = std::make_shared<LBVH::ConstructBVH>();
 
 	app->addElement(bvhConstructor);
-	app->addElement(g_emeCamera);
-	app->addElement(g_elemeDebugPrintf);
+	app->addElement(g_elemCamera);
+	// app->addElement(g_elemeDebugPrintf);
 	app->addElement(std::make_unique<nvvkhl::ElementLogger>(g_elemLogger.get(), false));  // Add logger window
-	app->addElement(std::make_unique<nvvkhl::ElementNvml>(false));                        // Add GPU monitor
+	// app->addElement(std::make_unique<nvvkhl::ElementNvml>(false));                        // Add GPU monitor
 
 	app->run();
 

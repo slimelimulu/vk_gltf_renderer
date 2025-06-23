@@ -71,10 +71,10 @@
 // The above command will run the benchmark test for 1000 frames and save the screenshot to "screenshots.png".
 
 
-std::shared_ptr<nvvkhl::ElementCamera>    g_elemCamera;    // The camera element (UI and movement)
+extern std::shared_ptr<nvvkhl::ElementCamera>    g_elemCamera;    // The camera element (UI and movement)
 std::shared_ptr<nvvkhl::ElementProfiler>  g_elemProfiler;  // GPU profiler
 std::shared_ptr<nvvkhl::ElementDbgPrintf> g_elemDebugPrintf;
-std::shared_ptr<nvvkhl::SampleAppLog>     g_elemLogger;              // Log window
+extern std::shared_ptr<nvvkhl::SampleAppLog>     g_elemLogger;              // Log window
 std::vector<std::string>                  g_applicationSearchPaths;  // Search paths for resources
 
 
@@ -701,7 +701,7 @@ static void setWindowIcon(GLFWwindow* window)
 ///
 ///
 ///
-auto main(int argc, char** argv) -> int
+auto main_(int argc, char** argv) -> int
 {
   nvvkhl::ApplicationCreateInfo appInfo;
   appInfo.name  = nvh::getExecutablePath().stem().string();
