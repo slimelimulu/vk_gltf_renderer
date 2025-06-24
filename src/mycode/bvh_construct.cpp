@@ -139,30 +139,10 @@ namespace LBVH {
 	// 将所有三角形的AABB添加到m_elements中，并计算出总的AABB
 	void ConstructBVH::generateElements(nvh::Bbox& extent) {
 		// fetch vertices from model
-		// https://github.com/KhronosGroup/glTF-Tutorials/blob/main/gltfTutorial/README.md
 		// 参考scene.cpp - 656
-		const tinygltf::Model& model = m_scene.m_gltfScene->getModel();
-		glm::vec3 minVal = { -1., -1., -1. };
-		glm::vec3 maxVal = { 1., 1., 1. };
-		for (const tinygltf::Accessor& accessor : model.accessors) {
-			if (!accessor.minValues.empty()) {
-				glm::vec3 localMin = {
-					accessor.minValues[0],
-					accessor.minValues[1],
-					accessor.minValues[2],
-				};
-				minVal = glm::min(minVal, localMin);
-			}
-			if (!accessor.maxValues.empty()) {
-				glm::vec3 localmax = {
-					accessor.maxValues[0],
-					accessor.maxValues[1],
-					accessor.maxValues[2],
-				};
-				maxVal = glm::max(maxVal, localmax);
-			}
-		}
-		extent = nvh::Bbox{ minVal, maxVal };
+		// 后续需要看gltfscene.cpp
+		extent = m_scene.m_gltfScene->getSceneBounds();
+		
 
 	}
 
