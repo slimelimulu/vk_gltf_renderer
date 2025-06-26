@@ -215,7 +215,7 @@ namespace LBVH {
 
 
 
-int main(int argc, char** argv) {
+int main_(int argc, char** argv) {
 	nvvkhl::ApplicationCreateInfo appInfo;
 	appInfo.name = "construct bvh";
 	appInfo.vSync = false;
