@@ -16,7 +16,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
-
+/*
 #include <thread>
 
 #if defined(WIN32)
@@ -701,7 +701,7 @@ static void setWindowIcon(GLFWwindow* window)
 ///
 ///
 ///
-auto main_(int argc, char** argv) -> int
+auto main__(int argc, char** argv) -> int
 {
   nvvkhl::ApplicationCreateInfo appInfo;
   appInfo.name  = nvh::getExecutablePath().stem().string();
@@ -867,3 +867,4 @@ auto main_(int argc, char** argv) -> int
 
   return 0;
 }
+*/

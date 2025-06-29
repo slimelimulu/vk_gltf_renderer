@@ -7,45 +7,16 @@
 #extension GL_EXT_fragment_shader_barycentric : enable
 #extension GL_EXT_shader_explicit_arithmetic_types : enable
 #extension GL_EXT_debug_printf : enable
-// #include "device_host.h"
 
-// #include "dh_bindings.h"
-const uint eFrameInfo = 0, eSceneDesc = 1, eTextures = 2;
-// #include "nvvkhl/shaders/dh_sky.h"
-// #include "nvvkhl/shaders/dh_scn_desc.h"
-
-// gltf的node结构
-struct RenderNode
-{
-  mat4 objectToWorld;
-  mat4 worldToObject;
-  int  materialID;
-  int  renderPrimID;
-};
-// Vertex buffer信息
-struct VertexBuffers
-{
-  uint64_t positionAddress;
-  uint64_t normalAddress;
-  uint64_t colorAddress;
-  uint64_t tangentAddress;
-  uint64_t texCoord0Address;
-  uint64_t texCoord1Address;
-};
-
-// gltf Primitive structure
-struct RenderPrimitive{
-	uint64_t indexAddress;
-	VertexBuffers vertexBuffer;
-};
-
-
-//#include "nvvkhl/shaders/func.h"
-//#include "nvvkhl/shaders/pbr_mat_struct.h"
-//#include "nvvkhl/shaders/bsdf_structs.h"
-//#include "nvvkhl/shaders/bsdf_functions.h"
-//#include "nvvkhl/shaders/light_contrib.h"
-
+#include "device_host.h"
+#include "dh_bindings.h"
+#include "nvvkhl/shaders/dh_sky.h"
+#include "nvvkhl/shaders/dh_scn_desc.h"
+#include "nvvkhl/shaders/func.h"
+#include "nvvkhl/shaders/pbr_mat_struct.h"
+#include "nvvkhl/shaders/bsdf_structs.h"
+#include "nvvkhl/shaders/bsdf_functions.h"
+#include "nvvkhl/shaders/light_contrib.h"
 #include "nvvkhl/shaders/vertex_accessor.h"
 
 layout(location = 0) in Interpolants {

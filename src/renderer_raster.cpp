@@ -628,7 +628,8 @@ void RendererRaster::recordRasterScene(Scene& scene)
 //--------------------------------------------------------------------------------------------------
 // Rendering the GLTF nodes (instances) contained in the list
 // The list should be: solid, blendable, all
-void RendererRaster::renderNodes(VkCommandBuffer cmd, Scene& scene, const std::vector<uint32_t>& nodeIDs)
+void RendererRaster::renderNodes(VkCommandBuffer cmd, Scene& scene, 
+    const std::vector<uint32_t>& nodeIDs)
 {
   auto scope_dbg = m_dbgUtil->DBG_SCOPE(cmd);
 

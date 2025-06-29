@@ -1,4 +1,4 @@
-
+/*
 #include <thread>
 
 #if defined(WIN32)
@@ -308,3 +308,4 @@ int main_(int argc, char** argv) {
 	vkContext.reset();
 	return 0;
 }
+*/

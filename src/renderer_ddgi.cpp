@@ -27,7 +27,7 @@ namespace DH {
 #include "shaders/dh_bindings.h"
 
 #include "renderer.hpp"
-#include "silhouette.hpp"
+//#include "silhouette.hpp"
 #include "nvvk/shaders_vk.hpp"
 #include "collapsing_header_manager.h"
 
@@ -83,7 +83,7 @@ namespace gltfr {
         {
             eRasterSolid,
             eRasterSolidDoubleSided,
-            //eRasterBlend,
+            eRasterBlend,
             //eRasterWireframe
         };
 
@@ -120,18 +120,18 @@ namespace gltfr {
 
 //--------------------------------------------------------------------------------------------------
 // vertex shader和原来的一样
-// fragment shader只进行ssao，然后
+// fragment shader只进行ssao
 
 bool RendererDDGIRaster::initShaders(Resources& res, bool reload)
 {
     nvh::ScopedTimer st(__FUNCTION__);
-
-    if (res.hasGlslCompiler() && (reload || g_forceExternalShaders))
+    reload = true;
+    if (res.hasGlslCompiler() && (reload))
     {
         // Loading the shaders
         m_spvShader.resize(eShaderGroupCount);
         m_spvShader[eVertex] = res.compileGlslShader("raster.vert.glsl", shaderc_shader_kind::shaderc_vertex_shader);
-        m_spvShader[eFragment] = res.compileGlslShader("raster.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
+        m_spvShader[eFragment] = res.compileGlslShader("m_raster.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
         m_spvShader[eFragmentOverlay] = res.compileGlslShader("raster_overlay.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
 
         for (size_t i = 0; i < m_spvShader.size(); i++)
@@ -162,6 +162,449 @@ bool RendererDDGIRaster::initShaders(Resources& res, bool reload)
     m_dbgUtil->DBG_NAME(m_shaderModules[eFragmentOverlay]);
 
     return true;
+}
+
+bool RendererDDGIRaster::reloadShaders(Resources& res, Scene& scene)
+{
+    if (!initShaders(res, true))
+        return false;
+    deinit();
+    createRasterPipeline(res, scene);
+    freeRecordCommandBuffer();
+    return true;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Initialize the rasterizer，只有SimpleBuffers
+//
+bool RendererDDGIRaster::init(Resources& res, Scene& scene)
+{
+    m_device = res.ctx.device;
+    m_commandPool = res.m_tempCommandPool->getCommandPool();
+    m_dbgUtil = std::make_unique<nvvk::DebugUtil>(m_device);
+
+    if (!initShaders(res, false))
+    {
+        return false;
+    }
+
+    m_gSimpleBuffers = std::make_unique<nvvkhl::GBuffer>(m_device, res.m_allocator.get());
+    createGBuffer(res, scene);
+    createRasterPipeline(res, scene);
+
+    return true;
+}
+
+//--------------------------------------------------------------------------------------------------
+// Destroying all allocated resources
+//
+void RendererDDGIRaster::deinit()
+{
+    if (m_rasterPipepline)
+        m_rasterPipepline->destroy(m_device);
+    m_rasterPipepline.reset();
+}
+
+//--------------------------------------------------------------------------------------------------
+// 创建一个simplegbuffer即可
+//
+void RendererDDGIRaster::createGBuffer(Resources& res, Scene& scene)
+{
+    nvh::ScopedTimer st(std::string(__FUNCTION__));
+
+    static VkFormat depthFormat = nvvk::findDepthFormat(res.ctx.physicalDevice);  // Not all depth are supported
+
+    // Normal size G-Buffer in which the super-sampling will be blitzed
+    m_gSimpleBuffers->destroy();
+    m_gSimpleBuffers->create(res.m_finalImage->getSize(), { VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R8_UNORM }, depthFormat);
+
+    //scene.m_sky->setOutImage(m_gSimpleBuffers->getDescriptorImageInfo());
+    //scene.m_hdrDome->setOutImage(m_gSimpleBuffers->getDescriptorImageInfo());
+}
+
+//--------------------------------------------------------------------------------------------------
+// Rendering the scene
+// - Draw first the sky or HDR dome
+// - Record the scene rendering (if not already done)
+// - Execute the scene rendering
+// - 只有一个colorAttachment，没有silhouette
+//
+void RendererDDGIRaster::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& scene, Settings& settings, nvvk::ProfilerVK& profiler)
+{
+    auto scopeDbg = m_dbgUtil->DBG_SCOPE(cmd);
+    auto sec = profiler.timeRecurring("Raster", cmd);
+
+    // Push constant
+    m_pushConst.dbgMethod = g_rasterSettings1.dbgMethod;
+
+    auto scope_dbg = m_dbgUtil->DBG_SCOPE(cmd);
+
+    // Rendering dome or sky in the background, it is covering the entire screen
+    {
+        const float      aspect_ratio = m_gSimpleBuffers->getAspectRatio();
+        const glm::mat4& view = CameraManip.getMatrix();
+        auto& clipPlanes = CameraManip.getClipPlanes();
+        glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(CameraManip.getFov()), aspect_ratio, clipPlanes.x, clipPlanes.y);
+        proj[1][1] *= -1;
+
+        const VkExtent2D imgSize = m_gSimpleBuffers->getSize();
+
+        // When not rendering the solid background, we render the sky or HDR dome
+        if (!settings.useSolidBackground)
+        {
+            if (settings.envSystem == Settings::eSky)
+            {
+                scene.m_sky->skyParams().yIsUp = CameraManip.getUp().y > CameraManip.getUp().z;
+                scene.m_sky->updateParameterBuffer(cmd);
+
+                auto skysec = profiler.timeRecurring("Sky", cmd);
+                scene.m_sky->draw(cmd, view, proj, imgSize);
+            }
+            else
+            {
+                auto hdrsec = profiler.timeRecurring("HDR Dome", cmd);
+
+                std::array<float, 4> color{ settings.hdrEnvIntensity, settings.hdrEnvIntensity, settings.hdrEnvIntensity, 1.0F };
+                scene.m_hdrDome->draw(cmd, view, proj, imgSize, color.data(), settings.hdrEnvRotation, settings.hdrBlur);
+            }
+        }
+    }
+
+    // Scene is recorded to avoid CPU overhead
+    if (m_recordedSceneCmd == VK_NULL_HANDLE)
+    {
+        recordRasterScene(scene);
+    }
+
+    // Execute recorded command buffer - the scene graph traversal is already in the secondary command buffer,
+    // but still need to execute it
+    {
+        auto         rastersec = profiler.timeRecurring("Raster", cmd);
+        VkClearValue colorClear{ .color = {settings.solidBackgroundColor.x, settings.solidBackgroundColor.y,
+                                          settings.solidBackgroundColor.z, 1.0F} };
+        VkClearValue depthClear{ .depthStencil = {1.0F, 0} };
+
+
+        // There are two color attachments, one for the super-sampled final image and one for the selection (silhouette)
+        // The depth is shared between the two
+        // The first color attachment is loaded because we don't want to erase the dome/sky, the second is cleared.
+        std::vector<VkRenderingAttachmentInfo> colorAttachments = {
+            VkRenderingAttachmentInfo{
+                .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                .imageView = m_gSimpleBuffers->getColorImageView(0),
+                .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+                .loadOp = settings.useSolidBackground ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+                .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                .clearValue = colorClear,
+            },
+        };
+
+        // Shared depth attachment
+        VkRenderingAttachmentInfo depthStencilAttachment{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = m_gSimpleBuffers->getDepthImageView(),
+            .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .clearValue = depthClear,
+        };
+
+        // Dynamic rendering information: color and depth attachments
+        VkRenderingInfo renderingInfo{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+            .renderArea = {{0, 0}, m_gSimpleBuffers->getSize()},
+            .layerCount = 1,
+            .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
+            .pColorAttachments = colorAttachments.data(),
+            .pDepthAttachment = &depthStencilAttachment,
+        };
+
+        vkCmdBeginRendering(cmd, &renderingInfo);
+        vkCmdExecuteCommands(cmd, 1, &m_recordedSceneCmd);
+        vkCmdEndRendering(cmd);
+    }
+
+}
+
+
+//--------------------------------------------------------------------------------------------------
+// Render the UI of the rasterizer
+//
+bool RendererDDGIRaster::onUI()
+{
+    auto& headerManager = CollapsingHeaderManager::getInstance();
+    bool changed{ false };
+
+    if (headerManager.beginHeader("RendererRaster"))
+    {
+        ImGui::PushID("RendererRaster");
+        PE::begin();
+        changed |= PE::Checkbox("SSAO", &g_rasterSettings1.ssao);
+        changed |= PE::Combo("Debug Method", reinterpret_cast<int32_t*>(&g_rasterSettings1.dbgMethod),
+            "None\0Metallic\0Roughness\0Normal\0Tangent\0Bitangent\0BaseColor\0Emissive\0Opacity\0TexCoord0\0TexCoord1\0\0");
+        PE::end();
+        ImGui::PopID();
+    }
+    if (changed)
+    {
+        vkDeviceWaitIdle(m_device);
+        freeRecordCommandBuffer();
+    }
+    return changed;
+}
+
+//--------------------------------------------------------------------------------------------------
+// If the scene has changed, or the resolution changed, we need to re-record the command buffer
+//
+void RendererDDGIRaster::handleChange(Resources& res, Scene& scene)
+{
+    static int  lastSelection = -1;
+    bool        resetRecorededScene = (lastSelection != scene.getSelectedRenderNode());
+    bool        gbufferChanged = res.hasGBuffersChanged();
+    bool        updateHdrDome = scene.hasDirtyFlag(Scene::eHdrEnv);
+    bool        visibilityChanged = scene.hasDirtyFlag(Scene::eNodeVisibility);
+
+    if (gbufferChanged || updateHdrDome || visibilityChanged)
+    {
+        vkDeviceWaitIdle(m_device);
+        lastSelection = scene.getSelectedRenderNode();
+        freeRecordCommandBuffer();
+    }
+    if (gbufferChanged)
+    {
+        // Need to recreate the output G-Buffers with the new size
+        createGBuffer(res, scene);
+        updateHdrDome = true;
+    }
+    if (updateHdrDome)
+    {
+        scene.m_hdrDome->setOutImage(m_gSimpleBuffers->getDescriptorImageInfo());
+    }
+
+}
+
+
+//--------------------------------------------------------------------------------------------------
+// Create the all pipelines for rendering the scene.
+// It uses the same layout for all pipelines
+// but the piplines are different for solid, blend, wireframe, etc.
+//
+void RendererDDGIRaster::createRasterPipeline(Resources& res, Scene& scene)
+{
+    nvh::ScopedTimer st(__FUNCTION__);
+
+    std::unique_ptr<nvvk::DebugUtil> dutil = std::make_unique<nvvk::DebugUtil>(m_device);
+    m_rasterPipepline = std::make_unique<nvvkhl::PipelineContainer>();
+
+    VkDescriptorSetLayout sceneSet = scene.m_sceneDescriptorSetLayout;
+    VkDescriptorSetLayout hdrDomeSet = scene.m_hdrDome->getDescLayout();
+    VkDescriptorSetLayout skySet = scene.m_sky->getDescriptorSetLayout();
+
+    // Creating the Pipeline Layout
+    std::vector<VkDescriptorSetLayout> layouts{ sceneSet }; // , hdrDomeSet, skySet
+    const VkPushConstantRange pushConstantRanges = { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                                    .offset = 0,
+                                                    .size = sizeof(DH::PushConstantRaster) };
+    VkPipelineLayoutCreateInfo create_info{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = static_cast<uint32_t>(layouts.size()),
+        .pSetLayouts = layouts.data(),
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstantRanges,
+    };
+    vkCreatePipelineLayout(m_device, &create_info, nullptr, &m_rasterPipepline->layout);
+
+    std::vector<VkFormat>         color_format = { 
+        m_gSimpleBuffers->getColorFormat(0),
+    };
+    VkPipelineRenderingCreateInfo renderingInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = uint32_t(color_format.size()),
+        .pColorAttachmentFormats = color_format.data(),
+        .depthAttachmentFormat = m_gSimpleBuffers->getDepthFormat(),
+    };
+
+    // Creating the Pipeline
+    nvvk::GraphicsPipelineGeneratorCombined gpb(m_device, m_rasterPipepline->layout, {} /*m_offscreenRenderPass*/);
+    gpb.createInfo.pNext = &renderingInfo;
+    gpb.addBindingDescriptions({ {0, sizeof(glm::vec3)} });// binding = 0, stride = vec3
+    gpb.addAttributeDescriptions({
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},  // Position(location, binding, format, offset)
+        });
+
+    {
+        // Solid
+        gpb.rasterizationState.depthBiasEnable = VK_TRUE;
+        gpb.rasterizationState.depthBiasConstantFactor = -1;
+        gpb.rasterizationState.depthBiasSlopeFactor = 1;
+        gpb.rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
+        gpb.setBlendAttachmentCount(uint32_t(color_format.size()));  // 2 color attachments
+        {
+            VkPipelineColorBlendAttachmentState blend_state{};
+            blend_state.colorWriteMask =
+                VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            blend_state.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            blend_state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            blend_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            gpb.setBlendAttachmentState(1, blend_state);
+        }
+
+        gpb.addShader(m_shaderModules[eVertex], VK_SHADER_STAGE_VERTEX_BIT);
+        gpb.addShader(m_shaderModules[eFragment], VK_SHADER_STAGE_FRAGMENT_BIT);
+        m_rasterPipepline->plines.push_back(gpb.createPipeline());
+        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[eRasterSolid]);
+        // Double Sided
+        gpb.rasterizationState.cullMode = VK_CULL_MODE_NONE;
+        m_rasterPipepline->plines.push_back(gpb.createPipeline());
+        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[eRasterSolidDoubleSided]);
+
+        // Blend
+        gpb.rasterizationState.cullMode = VK_CULL_MODE_NONE;
+        VkPipelineColorBlendAttachmentState blend_state{};
+        blend_state.blendEnable = VK_TRUE;
+        blend_state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        blend_state.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blend_state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blend_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        gpb.setBlendAttachmentState(0, blend_state);
+        m_rasterPipepline->plines.push_back(gpb.createPipeline());
+        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[eRasterBlend]);
+
+        // Revert Blend Mode
+        blend_state.blendEnable = VK_FALSE;
+        gpb.setBlendAttachmentState(0, blend_state);
+    }
+
+
+    // Cleanup
+    vkDestroyShaderModule(m_device, m_shaderModules[eVertex], nullptr);
+    vkDestroyShaderModule(m_device, m_shaderModules[eFragment], nullptr);
+    vkDestroyShaderModule(m_device, m_shaderModules[eFragmentOverlay], nullptr);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Raster commands are recorded to be replayed, this allocates that command buffer
+//
+void RendererDDGIRaster::createRecordCommandBuffer()
+{
+    VkCommandBufferAllocateInfo alloc_info{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = m_commandPool,
+        .level = VK_COMMAND_BUFFER_LEVEL_SECONDARY,
+        .commandBufferCount = 1,
+    };
+    vkAllocateCommandBuffers(m_device, &alloc_info, &m_recordedSceneCmd);
+}
+
+//--------------------------------------------------------------------------------------------------
+// Freeing the raster recoded command buffer
+//
+void RendererDDGIRaster::freeRecordCommandBuffer()
+{
+    vkFreeCommandBuffers(m_device, m_commandPool, 1, &m_recordedSceneCmd);
+    m_recordedSceneCmd = VK_NULL_HANDLE;
+}
+
+// --------------------------------------------------------------------------------------------------
+// Recording in a secondary command buffer, the raster rendering of the scene.
+//
+void RendererDDGIRaster::recordRasterScene(Scene & scene)
+{
+    nvh::ScopedTimer st(__FUNCTION__);
+
+    createRecordCommandBuffer();
+
+    std::vector<VkFormat> colorFormat = { m_gSimpleBuffers->getColorFormat(0),
+                                       };
+
+    VkCommandBufferInheritanceRenderingInfo inheritanceRenderingInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO,
+        .colorAttachmentCount = uint32_t(colorFormat.size()),
+        .pColorAttachmentFormats = colorFormat.data(),
+        .depthAttachmentFormat = m_gSimpleBuffers->getDepthFormat(),
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+
+    VkCommandBufferInheritanceInfo inheritInfo{ .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO,
+                                               .pNext = &inheritanceRenderingInfo };
+
+    VkCommandBufferBeginInfo beginInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT | VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
+        .pInheritanceInfo = &inheritInfo,
+    };
+
+    vkBeginCommandBuffer(m_recordedSceneCmd, &beginInfo);
+    renderRasterScene(m_recordedSceneCmd, scene);
+    vkEndCommandBuffer(m_recordedSceneCmd);
+}
+
+//--------------------------------------------------------------------------------------------------
+// rendering the gltf nodes contaied in the list
+void RendererDDGIRaster::renderNodes(VkCommandBuffer cmd, Scene& scene, const std::vector<uint32_t>& nodeIDs) {
+    auto scope_dbg = m_dbgUtil->DBG_SCOPE(cmd);
+
+    const VkDeviceSize offsets{ 0 };
+    const std::vector<nvh::gltf::RenderNode>& renderNodes = scene.m_gltfScene->getRenderNodes();
+    const std::vector<nvh::gltf::RenderPrimitive>& subMeshes = scene.m_gltfScene->getRenderPrimitives();
+
+    for (const uint32_t &nodeID : nodeIDs) {
+        const nvh::gltf::RenderNode& renderNode = renderNodes[nodeID];
+        const nvh::gltf::RenderPrimitive& subMesh = subMeshes[renderNode.renderPrimID];
+
+        if (!renderNode.visible) {
+            continue;
+        }
+
+        m_pushConst.materialID = renderNode.materialID;
+        m_pushConst.renderPrimID = renderNode.renderPrimID;
+        m_pushConst.renderNodeID = static_cast<int>(nodeID);
+        m_pushConst.selectedRenderNode = scene.getSelectedRenderNode();
+
+        vkCmdPushConstants(cmd, m_rasterPipepline->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0, sizeof(DH::PushConstantRaster), &m_pushConst);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &scene.m_gltfSceneVk->vertexBuffers()[renderNode.renderPrimID].position.buffer, &offsets);
+        vkCmdBindIndexBuffer(cmd, scene.m_gltfSceneVk->indices()[renderNode.renderPrimID].buffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, subMesh.indexCount, 1, 0, 0, 0);
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Render the entire scene for raster. Splitting the solid and blend-able element and rendering
+// on top
+// This is done in a recoded command buffer to be replay
+void RendererDDGIRaster::renderRasterScene(VkCommandBuffer cmd, Scene& scene)
+{
+    auto scope_dbg = m_dbgUtil->DBG_SCOPE(cmd);
+
+    const VkExtent2D& render_size = m_gSimpleBuffers->getSize();
+
+    const VkViewport viewport{ 0.0F, 0.0F, static_cast<float>(render_size.width), static_cast<float>(render_size.height),
+                              0.0F, 1.0F };
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    const VkRect2D scissor{ {0, 0}, {render_size.width, render_size.height} };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+
+    std::vector dset = { scene.m_sceneDescriptorSet}; // , scene.m_hdrDome->getDescSet(), scene.m_sky->getDescriptorSet() 
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipepline->layout, 0,
+        static_cast<uint32_t>(dset.size()), dset.data(), 0, nullptr);
+    // Draw solid
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipepline->plines[eRasterSolid]);
+    renderNodes(cmd, scene, scene.m_gltfScene->getShadedNodes(nvh::gltf::Scene::eRasterSolid));
+    //
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipepline->plines[eRasterSolidDoubleSided]);
+    renderNodes(cmd, scene, scene.m_gltfScene->getShadedNodes(nvh::gltf::Scene::eRasterSolidDoubleSided));
+    // Draw blend-able
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipepline->plines[eRasterBlend]);
+    renderNodes(cmd, scene, scene.m_gltfScene->getShadedNodes(nvh::gltf::Scene::eRasterBlend));
+
+}
+
+std::unique_ptr<Renderer> makeRendererDDGIRaster() {
+    return std::make_unique<RendererDDGIRaster>();
 }
 
 }
