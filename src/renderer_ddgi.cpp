@@ -84,6 +84,9 @@ namespace gltfr {
             eRasterSolid,
             eRasterSolidDoubleSided,
             eRasterBlend,
+            mDeferredSolid,
+            mDeferredDoubleSided,
+            mCompostion,
             //eRasterWireframe
         };
 
@@ -98,6 +101,7 @@ namespace gltfr {
         std::unique_ptr<nvvkhl::PipelineContainer> m_rasterPipepline{};      // Raster scene pipeline
         //std::unique_ptr<nvvkhl::GBuffer>           m_gSuperSampleBuffers{};  // G-Buffers: RGBA32F, R8, Depth32F
         std::unique_ptr<nvvkhl::GBuffer>           m_gSimpleBuffers{};       // G-Buffers: RGBA32F, R8, Depth32F
+        std::unique_ptr<nvvkhl::GBuffer>            m_gbuffer{}; // position, norm, ...
         std::unique_ptr<nvvk::DebugUtil>           m_dbgUtil{};
         //std::unique_ptr<Silhouette>                m_silhouette{};
 
@@ -107,6 +111,10 @@ namespace gltfr {
             eFragment,
             eFragmentOverlay,
             // Last entry is the number of shaders
+            mDeferVertex,
+            mDeferFrag,
+            mDebugVertex,
+            mDebugFrag,
             eShaderGroupCount
         };
         std::vector<shaderc::SpvCompilationResult>    m_spvShader;
@@ -133,7 +141,11 @@ bool RendererDDGIRaster::initShaders(Resources& res, bool reload)
         m_spvShader[eVertex] = res.compileGlslShader("raster.vert.glsl", shaderc_shader_kind::shaderc_vertex_shader);
         m_spvShader[eFragment] = res.compileGlslShader("m_raster.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
         m_spvShader[eFragmentOverlay] = res.compileGlslShader("raster_overlay.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
-
+        m_spvShader[mDeferVertex]   = res.compileGlslShader("m_deferred.vert.glsl", shaderc_shader_kind::shaderc_vertex_shader);
+        m_spvShader[mDeferFrag]     = res.compileGlslShader("m_deferred.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
+        m_spvShader[mDebugVertex]   = res.compileGlslShader("m_debugGbuffer.vert.glsl", shaderc_shader_kind::shaderc_vertex_shader);
+        m_spvShader[mDebugFrag]     = res.compileGlslShader("m_debugGbuffer.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
+            
         for (size_t i = 0; i < m_spvShader.size(); i++)
         {
             auto& s = m_spvShader[i];
@@ -189,6 +201,7 @@ bool RendererDDGIRaster::init(Resources& res, Scene& scene)
     }
 
     m_gSimpleBuffers = std::make_unique<nvvkhl::GBuffer>(m_device, res.m_allocator.get());
+    m_gbuffer = std::make_unique<nvvkhl::GBuffer>(m_device, res.m_allocator.get());
     createGBuffer(res, scene);
     createRasterPipeline(res, scene);
 
@@ -217,6 +230,16 @@ void RendererDDGIRaster::createGBuffer(Resources& res, Scene& scene)
     // Normal size G-Buffer in which the super-sampling will be blitzed
     m_gSimpleBuffers->destroy();
     m_gSimpleBuffers->create(res.m_finalImage->getSize(), { VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R8_UNORM }, depthFormat);
+
+    m_gbuffer->destroy();
+    m_gbuffer->create(res.m_finalImage->getSize(),
+        { 
+            VK_FORMAT_R16G16B16A16_SFLOAT, // position
+            VK_FORMAT_R16G16B16A16_SFLOAT, // normal
+            VK_FORMAT_R16G16B16A16_SFLOAT, // tangent
+            VK_FORMAT_R16G16_SFLOAT, // uv
+            VK_FORMAT_R8G8B8A8_UNORM, // Albedo
+        }, depthFormat);
 
     //scene.m_sky->setOutImage(m_gSimpleBuffers->getDescriptorImageInfo());
     //scene.m_hdrDome->setOutImage(m_gSimpleBuffers->getDescriptorImageInfo());
@@ -416,21 +439,36 @@ void RendererDDGIRaster::createRasterPipeline(Resources& res, Scene& scene)
     vkCreatePipelineLayout(m_device, &create_info, nullptr, &m_rasterPipepline->layout);
 
     std::vector<VkFormat>         color_format = { 
-        m_gSimpleBuffers->getColorFormat(0),
+        m_gbuffer->getColorFormat(0),
+        m_gbuffer->getColorFormat(1),
+        m_gbuffer->getColorFormat(2),
+        m_gbuffer->getColorFormat(3),
+        m_gbuffer->getColorFormat(4),
     };
     VkPipelineRenderingCreateInfo renderingInfo{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount = uint32_t(color_format.size()),
         .pColorAttachmentFormats = color_format.data(),
-        .depthAttachmentFormat = m_gSimpleBuffers->getDepthFormat(),
+        .depthAttachmentFormat = m_gbuffer->getDepthFormat(),
     };
 
     // Creating the Pipeline
     nvvk::GraphicsPipelineGeneratorCombined gpb(m_device, m_rasterPipepline->layout, {} /*m_offscreenRenderPass*/);
     gpb.createInfo.pNext = &renderingInfo;
     gpb.addBindingDescriptions({ {0, sizeof(glm::vec3)} });// binding = 0, stride = vec3
+    /*
+    gltf_scene_vk:
+        nvvk::Buffer position;
+        nvvk::Buffer normal;
+        nvvk::Buffer tangent;
+        nvvk::Buffer texCoord0;
+        nvvk::Buffer texCoord1;
+        nvvk::Buffer color;
+    */
     gpb.addAttributeDescriptions({
-        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},  // Position(location, binding, format, offset)
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0}, // position
+
+        // Position(location, binding, format, offset)
         });
 
     {
@@ -440,40 +478,16 @@ void RendererDDGIRaster::createRasterPipeline(Resources& res, Scene& scene)
         gpb.rasterizationState.depthBiasSlopeFactor = 1;
         gpb.rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
         gpb.setBlendAttachmentCount(uint32_t(color_format.size()));  // 2 color attachments
-        {
-            VkPipelineColorBlendAttachmentState blend_state{};
-            blend_state.colorWriteMask =
-                VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-            blend_state.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-            blend_state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            blend_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            gpb.setBlendAttachmentState(1, blend_state);
-        }
+        // 疑问：对于vec2，这样设置也可以吗
 
-        gpb.addShader(m_shaderModules[eVertex], VK_SHADER_STAGE_VERTEX_BIT);
-        gpb.addShader(m_shaderModules[eFragment], VK_SHADER_STAGE_FRAGMENT_BIT);
+        gpb.addShader(m_shaderModules[mDebugVertex], VK_SHADER_STAGE_VERTEX_BIT);
+        gpb.addShader(m_shaderModules[mDebugFrag], VK_SHADER_STAGE_FRAGMENT_BIT);
         m_rasterPipepline->plines.push_back(gpb.createPipeline());
-        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[eRasterSolid]);
+        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[mDeferredSolid]);
         // Double Sided
         gpb.rasterizationState.cullMode = VK_CULL_MODE_NONE;
         m_rasterPipepline->plines.push_back(gpb.createPipeline());
-        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[eRasterSolidDoubleSided]);
-
-        // Blend
-        gpb.rasterizationState.cullMode = VK_CULL_MODE_NONE;
-        VkPipelineColorBlendAttachmentState blend_state{};
-        blend_state.blendEnable = VK_TRUE;
-        blend_state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        blend_state.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-        blend_state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        blend_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        gpb.setBlendAttachmentState(0, blend_state);
-        m_rasterPipepline->plines.push_back(gpb.createPipeline());
-        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[eRasterBlend]);
-
-        // Revert Blend Mode
-        blend_state.blendEnable = VK_FALSE;
-        gpb.setBlendAttachmentState(0, blend_state);
+        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[mDeferredDoubleSided]);
     }
 
 
@@ -482,6 +496,8 @@ void RendererDDGIRaster::createRasterPipeline(Resources& res, Scene& scene)
     vkDestroyShaderModule(m_device, m_shaderModules[eFragment], nullptr);
     vkDestroyShaderModule(m_device, m_shaderModules[eFragmentOverlay], nullptr);
 }
+
+
 
 //--------------------------------------------------------------------------------------------------
 // Raster commands are recorded to be replayed, this allocates that command buffer
