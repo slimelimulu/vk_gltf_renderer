@@ -81,12 +81,13 @@ namespace gltfr {
 
         enum PipelineType
         {
-            eRasterSolid,
-            eRasterSolidDoubleSided,
-            eRasterBlend,
+            //eRasterSolid,
+            //eRasterSolidDoubleSided,
+            //eRasterBlend,
+            mComposition,
             mDeferredSolid,
             mDeferredDoubleSided,
-            mCompostion,
+            
             //eRasterWireframe
         };
 
@@ -113,8 +114,8 @@ namespace gltfr {
             // Last entry is the number of shaders
             mDeferVertex,
             mDeferFrag,
-            mDebugVertex,
-            mDebugFrag,
+            mComposeVertex,
+            mComposeFrag,
             eShaderGroupCount
         };
         std::vector<shaderc::SpvCompilationResult>    m_spvShader;
@@ -143,8 +144,8 @@ bool RendererDDGIRaster::initShaders(Resources& res, bool reload)
         m_spvShader[eFragmentOverlay] = res.compileGlslShader("raster_overlay.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
         m_spvShader[mDeferVertex]   = res.compileGlslShader("m_deferred.vert.glsl", shaderc_shader_kind::shaderc_vertex_shader);
         m_spvShader[mDeferFrag]     = res.compileGlslShader("m_deferred.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
-        m_spvShader[mDebugVertex]   = res.compileGlslShader("m_debugGbuffer.vert.glsl", shaderc_shader_kind::shaderc_vertex_shader);
-        m_spvShader[mDebugFrag]     = res.compileGlslShader("m_debugGbuffer.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
+        m_spvShader[mComposeVertex]   = res.compileGlslShader("m_debugGbuffer.vert.glsl", shaderc_shader_kind::shaderc_vertex_shader);
+        m_spvShader[mComposeFrag]     = res.compileGlslShader("m_debugGbuffer.frag.glsl", shaderc_shader_kind::shaderc_fragment_shader);
             
         for (size_t i = 0; i < m_spvShader.size(); i++)
         {
@@ -167,11 +168,14 @@ bool RendererDDGIRaster::initShaders(Resources& res, bool reload)
         m_shaderModules[eVertex] = nvvk::createShaderModule(m_device, vert_shd);
         m_shaderModules[eFragment] = nvvk::createShaderModule(m_device, frag_shd);
         m_shaderModules[eFragmentOverlay] = nvvk::createShaderModule(m_device, overlay_shd);
+
     }
 
     m_dbgUtil->DBG_NAME(m_shaderModules[eVertex]);
     m_dbgUtil->DBG_NAME(m_shaderModules[eFragment]);
     m_dbgUtil->DBG_NAME(m_shaderModules[eFragmentOverlay]);
+    m_dbgUtil->DBG_NAME(m_shaderModules[mComposeVertex]);
+    m_dbgUtil->DBG_NAME(m_shaderModules[mComposeFrag]);
 
     return true;
 }
@@ -455,7 +459,16 @@ void RendererDDGIRaster::createRasterPipeline(Resources& res, Scene& scene)
     // Creating the Pipeline
     nvvk::GraphicsPipelineGeneratorCombined gpb(m_device, m_rasterPipepline->layout, {} /*m_offscreenRenderPass*/);
     gpb.createInfo.pNext = &renderingInfo;
-    gpb.addBindingDescriptions({ {0, sizeof(glm::vec3)} });// binding = 0, stride = vec3
+
+    {
+        // composition
+        gpb.rasterizationState.cullMode = VK_CULL_MODE_FRONT_BIT;
+        gpb.addShader(m_shaderModules[mComposeVertex], VK_SHADER_STAGE_VERTEX_BIT);
+        gpb.addShader(m_shaderModules[mComposeFrag], VK_SHADER_STAGE_FRAGMENT_BIT);
+        m_rasterPipepline->plines.push_back(gpb.createPipeline());
+        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[mComposition]);
+    }
+
     /*
     gltf_scene_vk:
         nvvk::Buffer position;
@@ -465,9 +478,21 @@ void RendererDDGIRaster::createRasterPipeline(Resources& res, Scene& scene)
         nvvk::Buffer texCoord1;
         nvvk::Buffer color;
     */
+    // 参考gltf_scene_vk.cpp - 499
+    gpb.addBindingDescriptions({ 
+        {0, sizeof(glm::vec3)}, // pos
+        {1, sizeof(glm::vec3)}, // normal
+        {2, sizeof(glm::vec4)}, // color
+        {3, sizeof(glm::vec4)}, // tangent
+        {4, sizeof(glm::vec2)}, // texCoord0
+    });// binding = 0, stride = vec3
+    
     gpb.addAttributeDescriptions({
-        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0}, // position
-
+        {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0}, // pos
+        {1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0}, // normal
+        {2, 2, VK_FORMAT_R8G8B8A8_UNORM, 0}, // color
+        {3, 3, VK_FORMAT_R32G32B32A32_SFLOAT, 0}, // tangent
+        {4, 4, VK_FORMAT_R32G32_SFLOAT, 0}, // texCoord
         // Position(location, binding, format, offset)
         });
 
@@ -480,8 +505,8 @@ void RendererDDGIRaster::createRasterPipeline(Resources& res, Scene& scene)
         gpb.setBlendAttachmentCount(uint32_t(color_format.size()));  // 2 color attachments
         // 疑问：对于vec2，这样设置也可以吗
 
-        gpb.addShader(m_shaderModules[mDebugVertex], VK_SHADER_STAGE_VERTEX_BIT);
-        gpb.addShader(m_shaderModules[mDebugFrag], VK_SHADER_STAGE_FRAGMENT_BIT);
+        gpb.addShader(m_shaderModules[mDeferVertex  ], VK_SHADER_STAGE_VERTEX_BIT);
+        gpb.addShader(m_shaderModules[mDeferFrag    ], VK_SHADER_STAGE_FRAGMENT_BIT);
         m_rasterPipepline->plines.push_back(gpb.createPipeline());
         m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[mDeferredSolid]);
         // Double Sided
@@ -490,11 +515,13 @@ void RendererDDGIRaster::createRasterPipeline(Resources& res, Scene& scene)
         m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[mDeferredDoubleSided]);
     }
 
-
+    
     // Cleanup
     vkDestroyShaderModule(m_device, m_shaderModules[eVertex], nullptr);
     vkDestroyShaderModule(m_device, m_shaderModules[eFragment], nullptr);
     vkDestroyShaderModule(m_device, m_shaderModules[eFragmentOverlay], nullptr);
+    vkDestroyShaderModule(m_device, m_shaderModules[mDeferVertex], nullptr);
+    vkDestroyShaderModule(m_device, m_shaderModules[mDeferFrag], nullptr);
 }
 
 
@@ -561,7 +588,7 @@ void RendererDDGIRaster::recordRasterScene(Scene & scene)
 void RendererDDGIRaster::renderNodes(VkCommandBuffer cmd, Scene& scene, const std::vector<uint32_t>& nodeIDs) {
     auto scope_dbg = m_dbgUtil->DBG_SCOPE(cmd);
 
-    const VkDeviceSize offsets{ 0 };
+    const VkDeviceSize offsets[]{ 0,0,0,0,0 };
     const std::vector<nvh::gltf::RenderNode>& renderNodes = scene.m_gltfScene->getRenderNodes();
     const std::vector<nvh::gltf::RenderPrimitive>& subMeshes = scene.m_gltfScene->getRenderPrimitives();
 
@@ -572,7 +599,13 @@ void RendererDDGIRaster::renderNodes(VkCommandBuffer cmd, Scene& scene, const st
         if (!renderNode.visible) {
             continue;
         }
-
+        VkBuffer vertexBuffers[] = { 
+            scene.m_gltfSceneVk->vertexBuffers()[renderNode.renderPrimID].position.buffer,
+            scene.m_gltfSceneVk->vertexBuffers()[renderNode.renderPrimID].normal.buffer,
+            scene.m_gltfSceneVk->vertexBuffers()[renderNode.renderPrimID].color.buffer,
+            scene.m_gltfSceneVk->vertexBuffers()[renderNode.renderPrimID].tangent.buffer,
+            scene.m_gltfSceneVk->vertexBuffers()[renderNode.renderPrimID].texCoord0.buffer,
+        };
         m_pushConst.materialID = renderNode.materialID;
         m_pushConst.renderPrimID = renderNode.renderPrimID;
         m_pushConst.renderNodeID = static_cast<int>(nodeID);
@@ -580,7 +613,7 @@ void RendererDDGIRaster::renderNodes(VkCommandBuffer cmd, Scene& scene, const st
 
         vkCmdPushConstants(cmd, m_rasterPipepline->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             0, sizeof(DH::PushConstantRaster), &m_pushConst);
-        vkCmdBindVertexBuffers(cmd, 0, 1, &scene.m_gltfSceneVk->vertexBuffers()[renderNode.renderPrimID].position.buffer, &offsets);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &scene.m_gltfSceneVk->vertexBuffers()[renderNode.renderPrimID].position.buffer, offsets);
         vkCmdBindIndexBuffer(cmd, scene.m_gltfSceneVk->indices()[renderNode.renderPrimID].buffer, 0, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(cmd, subMesh.indexCount, 1, 0, 0, 0);
     }
