@@ -41,15 +41,19 @@ layout(push_constant) uniform RasterPushConstant_
   PushConstantRaster pc;
 };
 
-layout(location = 0) in vec3 i_pos;
+layout(location = 0) in vec4 ipos;
+layout(location = 1) in vec4 inormal;
+layout(location = 2) in vec4 icolor;
+layout(location = 3) in vec4 itangent;
+layout(location = 4) in vec2 itexCoord;
 
 layout(location = 0) out Interpolants
 {
   vec3 pos;
-  vec3 nrm;
-  vec2 uv[2];
-  vec3 tangent;
+  vec4 normal;
   vec4 color;
+  vec4 tangent;
+  vec2 texCoord;
 }
 OUT;
 
@@ -62,9 +66,11 @@ out gl_PerVertex
 void main()
 {
   RenderNode renderNode = RenderNodeBuf(sceneDesc.renderNodeAddress)._[pc.renderNodeID];
-  RenderPrimitive renderPrim = RenderPrimitiveBuf(sceneDesc.renderPrimitiveAddress)._[pc.renderPrimID];
-  
-  
-  OUT.pos               = vec3(renderNode.objectToWorld * vec4(i_pos, 1.0));
+  OUT.pos               = vec3(renderNode.objectToWorld * vec4(ipos.xyz, 1.0));
   gl_Position           = frameInfo.projMatrix * frameInfo.viewMatrix * vec4(OUT.pos, 1.0);
+  OUT.normal = inormal;
+  OUT.color = icolor;
+  OUT.tangent = itangent;
+  OUT.texCoord = itexCoord;
+
 }

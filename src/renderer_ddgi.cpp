@@ -84,7 +84,7 @@ namespace gltfr {
             //eRasterSolid,
             //eRasterSolidDoubleSided,
             //eRasterBlend,
-            mComposition,
+            
             mDeferredSolid,
             mDeferredDoubleSided,
             
@@ -99,7 +99,8 @@ namespace gltfr {
 
         DH::PushConstantRaster m_pushConst{};
 
-        std::unique_ptr<nvvkhl::PipelineContainer> m_rasterPipepline{};      // Raster scene pipeline
+        std::unique_ptr<nvvkhl::PipelineContainer> m_rasterPipeplineMRT{};      // Raster scene pipeline
+        std::unique_ptr<nvvkhl::PipelineContainer> m_rasterPipeplineCOMP{};      // Raster scene pipeline
         //std::unique_ptr<nvvkhl::GBuffer>           m_gSuperSampleBuffers{};  // G-Buffers: RGBA32F, R8, Depth32F
         std::unique_ptr<nvvkhl::GBuffer>           m_gSimpleBuffers{};       // G-Buffers: RGBA32F, R8, Depth32F
         std::unique_ptr<nvvkhl::GBuffer>            m_gbuffer{}; // position, norm, ...
@@ -226,10 +227,14 @@ bool RendererDDGIRaster::init(Resources& res, Scene& scene)
 void RendererDDGIRaster::deinit()
 {
     m_dset->deinit();
-    if (m_rasterPipepline)
-        m_rasterPipepline->destroy(m_device);
+    if (m_rasterPipeplineMRT)
+        m_rasterPipeplineMRT->destroy(m_device);
 
-    m_rasterPipepline.reset();
+    m_rasterPipeplineMRT.reset();
+    if (m_rasterPipeplineCOMP)
+        m_rasterPipeplineCOMP->destroy(m_device);
+
+    m_rasterPipeplineCOMP.reset();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -247,7 +252,7 @@ void RendererDDGIRaster::createGBuffer(Resources& res, Scene& scene)
 
     m_gbuffer->destroy();
     m_gbuffer->create(res.m_finalImage->getSize(),
-        { 
+        {
             VK_FORMAT_R16G16B16A16_SFLOAT, // position
             VK_FORMAT_R16G16B16A16_SFLOAT, // normal
             VK_FORMAT_R16G16B16A16_SFLOAT, // tangent
@@ -257,9 +262,31 @@ void RendererDDGIRaster::createGBuffer(Resources& res, Scene& scene)
 
     //scene.m_sky->setOutImage(m_gSimpleBuffers->getDescriptorImageInfo());
     //scene.m_hdrDome->setOutImage(m_gSimpleBuffers->getDescriptorImageInfo());
-    // create texture for gbuffer
+    // Create descriptorlayout for composition
 
+    m_dset->addBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5, VK_SHADER_STAGE_FRAGMENT_BIT);
+    m_dset->initLayout();
+    m_dset->initPool(1);  // two frames - allow to change on the fly
 
+    // writing to descriptors
+    std::vector<VkWriteDescriptorSet> writes;
+    std::vector<VkDescriptorImageInfo> descImageInfos;
+    for (int i = 0; i < 5; i++) {
+        descImageInfos.push_back(m_gbuffer->getDescriptorImageInfo(i));
+    }
+    writes.push_back(VkWriteDescriptorSet{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = m_dset->getSet(0),
+        .dstBinding = 0,
+        .dstArrayElement = 0,
+        .descriptorCount = 5,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = descImageInfos.data()
+
+        });
+    vkUpdateDescriptorSets(res.ctx.device, static_cast<uint32_t>(writes.size()),
+        writes.data(), 0, nullptr);
+}
 //--------------------------------------------------------------------------------------------------
 // Rendering the scene
 // - Draw first the sky or HDR dome
@@ -287,84 +314,191 @@ void RendererDDGIRaster::render(VkCommandBuffer cmd, Resources& /*res*/, Scene& 
 
         const VkExtent2D imgSize = m_gSimpleBuffers->getSize();
 
-        // When not rendering the solid background, we render the sky or HDR dome
-        if (!settings.useSolidBackground)
+        // Scene is recorded to avoid CPU overhead
+        if (m_recordedSceneCmd == VK_NULL_HANDLE)
         {
-            if (settings.envSystem == Settings::eSky)
-            {
-                scene.m_sky->skyParams().yIsUp = CameraManip.getUp().y > CameraManip.getUp().z;
-                scene.m_sky->updateParameterBuffer(cmd);
-
-                auto skysec = profiler.timeRecurring("Sky", cmd);
-                scene.m_sky->draw(cmd, view, proj, imgSize);
-            }
-            else
-            {
-                auto hdrsec = profiler.timeRecurring("HDR Dome", cmd);
-
-                std::array<float, 4> color{ settings.hdrEnvIntensity, settings.hdrEnvIntensity, settings.hdrEnvIntensity, 1.0F };
-                scene.m_hdrDome->draw(cmd, view, proj, imgSize, color.data(), settings.hdrEnvRotation, settings.hdrBlur);
-            }
+            recordRasterScene(scene);
         }
-    }
 
-    // Scene is recorded to avoid CPU overhead
-    if (m_recordedSceneCmd == VK_NULL_HANDLE)
-    {
-        recordRasterScene(scene);
-    }
+        // Execute recorded command buffer - the scene graph traversal is already in the secondary command buffer,
+        // but still need to execute it
+        {
+            auto         rastersec = profiler.timeRecurring("RasterMRT", cmd);
+            std::vector<VkClearValue> colorClears{
+                {.color = {0.0F, 0.0F, 0.0F, 1.0F}},
+                {.color = {0.0F, 0.0F, 0.0F, 1.0F}},
+                {.color = {0.0F, 0.0F, 0.0F, 1.0F}},
+                {.color = {0.0F, 0.0F, 0.0F, 1.0F}},
+                {.color = {0.0F, 0.0F}},
+            };
+            VkClearValue depthClear{ .depthStencil = {1.0F, 0} };
+            // There are two color attachments, one for the super-sampled final image and one for the selection (silhouette)
+            // The depth is shared between the two
+            // The first color attachment is loaded because we don't want to erase the dome/sky, the second is cleared.
+            std::vector<VkRenderingAttachmentInfo> colorAttachments = {
+                VkRenderingAttachmentInfo{
+                    .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                    .imageView = m_gbuffer->getColorImageView(0),
+                    .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+                    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                    .clearValue = colorClears[0],
+                },
+                VkRenderingAttachmentInfo{
+                    .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                    .imageView = m_gbuffer->getColorImageView(1),
+                    .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+                    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                    .clearValue = colorClears[1],
+                },
+                VkRenderingAttachmentInfo{
+                    .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                    .imageView = m_gbuffer->getColorImageView(2),
+                    .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+                    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                    .clearValue = colorClears[2],
+                },
+                VkRenderingAttachmentInfo{
+                    .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                    .imageView = m_gbuffer->getColorImageView(3),
+                    .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+                    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                    .clearValue = colorClears[3],
+                },
+            };
 
-    // Execute recorded command buffer - the scene graph traversal is already in the secondary command buffer,
-    // but still need to execute it
-    {
-        auto         rastersec = profiler.timeRecurring("Raster", cmd);
-        VkClearValue colorClear{ .color = {settings.solidBackgroundColor.x, settings.solidBackgroundColor.y,
-                                          settings.solidBackgroundColor.z, 1.0F} };
-        VkClearValue depthClear{ .depthStencil = {1.0F, 0} };
-
-
-        // There are two color attachments, one for the super-sampled final image and one for the selection (silhouette)
-        // The depth is shared between the two
-        // The first color attachment is loaded because we don't want to erase the dome/sky, the second is cleared.
-        std::vector<VkRenderingAttachmentInfo> colorAttachments = {
-            VkRenderingAttachmentInfo{
+            // Shared depth attachment
+            VkRenderingAttachmentInfo depthStencilAttachment{
                 .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                .imageView = m_gSimpleBuffers->getColorImageView(0),
+                .imageView = m_gbuffer->getDepthImageView(),
                 .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
-                .loadOp = settings.useSolidBackground ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+                .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
                 .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                .clearValue = colorClear,
-            },
-        };
+                .clearValue = depthClear,
+            };
 
-        // Shared depth attachment
-        VkRenderingAttachmentInfo depthStencilAttachment{
-            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView = m_gSimpleBuffers->getDepthImageView(),
-            .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .clearValue = depthClear,
-        };
+            // Dynamic rendering information: color and depth attachments
+            VkRenderingInfo renderingInfo{
+                .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+                .renderArea = {{0, 0}, m_gSimpleBuffers->getSize()},
+                .layerCount = 1,
+                .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
+                .pColorAttachments = colorAttachments.data(),
+                .pDepthAttachment = &depthStencilAttachment,
+            };
 
-        // Dynamic rendering information: color and depth attachments
-        VkRenderingInfo renderingInfo{
-            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-            .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
-            .renderArea = {{0, 0}, m_gSimpleBuffers->getSize()},
-            .layerCount = 1,
-            .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
-            .pColorAttachments = colorAttachments.data(),
-            .pDepthAttachment = &depthStencilAttachment,
-        };
+            vkCmdBeginRendering(cmd, &renderingInfo);
+            vkCmdExecuteCommands(cmd, 1, &m_recordedSceneCmd);
+            vkCmdEndRendering(cmd);
+        }
+        {
+            VkStructureType            sType;
+            const void* pNext;
+            VkAccessFlags              srcAccessMask;
+            VkAccessFlags              dstAccessMask;
+            VkImageLayout              oldLayout;
+            VkImageLayout              newLayout;
+            uint32_t                   srcQueueFamilyIndex;
+            uint32_t                   dstQueueFamilyIndex;
+            VkImage                    image;
+            VkImageSubresourceRange    subresourceRange;
+            // 由于是dynamic rendering，所以需要用到Barrier
+            std::vector<VkImageMemoryBarrier> gbufferMemoryBarrier;
+            for (int32_t i = 0; i < 5; i++) {
+                gbufferMemoryBarrier.push_back(
+                    {
+                        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                        .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        .image = m_gbuffer->getColorImage(i),
+                        .subresourceRange = {
+                            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                            .baseMipLevel = 0,
+                            .levelCount = 1,
+                            .baseArrayLayer = 0,
+                            .layerCount = 1
+                        },
+                    });
 
-        vkCmdBeginRendering(cmd, &renderingInfo);
-        vkCmdExecuteCommands(cmd, 1, &m_recordedSceneCmd);
-        vkCmdEndRendering(cmd);
+            }
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, gbufferMemoryBarrier.size(), gbufferMemoryBarrier.data());
+
+
+            // Composition
+            auto         rastersec = profiler.timeRecurring("RasterCOMP", cmd);
+            VkClearValue colorClear{ .color = {settings.solidBackgroundColor.x, settings.solidBackgroundColor.y,
+                                              settings.solidBackgroundColor.z, 1.0F} };
+            VkClearValue depthClear{ .depthStencil = {1.0F, 0} };
+
+
+            // There are two color attachments, one for the super-sampled final image and one for the selection (silhouette)
+            // The depth is shared between the two
+            // The first color attachment is loaded because we don't want to erase the dome/sky, the second is cleared.
+            std::vector<VkRenderingAttachmentInfo> colorAttachments = {
+                VkRenderingAttachmentInfo{
+                    .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                    .imageView = m_gSimpleBuffers->getColorImageView(0),
+                    .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+                    .loadOp = settings.useSolidBackground ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                    .clearValue = colorClear,
+                },
+            };
+
+            // Shared depth attachment
+            VkRenderingAttachmentInfo depthStencilAttachment{
+                .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                .imageView = m_gSimpleBuffers->getDepthImageView(),
+                .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+                .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                .clearValue = depthClear,
+            };
+
+            // Dynamic rendering information: color and depth attachments
+            VkRenderingInfo renderingInfo{
+                .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+                .renderArea = {{0, 0}, m_gSimpleBuffers->getSize()},
+                .layerCount = 1,
+                .colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size()),
+                .pColorAttachments = colorAttachments.data(),
+                .pDepthAttachment = &depthStencilAttachment,
+            };
+
+            vkCmdBeginRendering(cmd, &renderingInfo);
+
+            VkViewport viewport = {};
+            viewport.width = m_gSimpleBuffers->getSize().width;
+            viewport.height = m_gSimpleBuffers->getSize().height;
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+            VkRect2D scissor = {};
+            scissor.extent = m_gSimpleBuffers->getSize();
+            scissor.offset = { 0, 0 };
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+            std::vector<VkDescriptorSet> dset = { m_dset->getSet(0)};
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipeplineCOMP->layout, 0,
+                static_cast<uint32_t>(dset.size()), dset.data(), 0, nullptr);
+            // Draw solid
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipeplineCOMP->plines[0]);
+            
+            vkCmdEndRendering(cmd);
+        }
+
     }
-
 }
-
 
 //--------------------------------------------------------------------------------------------------
 // Render the UI of the rasterizer
@@ -433,98 +567,83 @@ void RendererDDGIRaster::createRasterPipeline(Resources& res, Scene& scene)
     nvh::ScopedTimer st(__FUNCTION__);
 
     std::unique_ptr<nvvk::DebugUtil> dutil = std::make_unique<nvvk::DebugUtil>(m_device);
-    m_rasterPipepline = std::make_unique<nvvkhl::PipelineContainer>();
+    m_rasterPipeplineMRT = std::make_unique<nvvkhl::PipelineContainer>();
+    m_rasterPipeplineCOMP = std::make_unique<nvvkhl::PipelineContainer>();
 
     VkDescriptorSetLayout sceneSet = scene.m_sceneDescriptorSetLayout;
     VkDescriptorSetLayout hdrDomeSet = scene.m_hdrDome->getDescLayout();
     VkDescriptorSetLayout skySet = scene.m_sky->getDescriptorSetLayout();
-    // Create descriptorlayout for composition
-
-    m_dset->addBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
-    m_dset->addBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
-    m_dset->addBinding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
-    m_dset->addBinding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
-    m_dset->addBinding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
-    m_dset->initLayout();
-    m_dset->initPool(1);  // two frames - allow to change on the fly
-
-    // writing to descriptors
-    std::vector<VkWriteDescriptorSet> writes;
-    std::vector<VkDescriptorImageInfo> descImageInfos;
-    
-
-
-    writes.emplace_back(m_dest->makeWrite(0, 0, &m_gbuffer->desc));
-
-    // Creating the Pipeline Layout
-    std::vector<VkDescriptorSetLayout> layouts{ sceneSet }; // , hdrDomeSet, skySet
-    const VkPushConstantRange pushConstantRanges = { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                                    .offset = 0,
-                                                    .size = sizeof(DH::PushConstantRaster) };
-    VkPipelineLayoutCreateInfo create_info{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = static_cast<uint32_t>(layouts.size()),
-        .pSetLayouts = layouts.data(),
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges = &pushConstantRanges,
-    };
-    vkCreatePipelineLayout(m_device, &create_info, nullptr, &m_rasterPipepline->layout);
-
-    std::vector<VkFormat>         color_format = { 
-        m_gbuffer->getColorFormat(0),
-        m_gbuffer->getColorFormat(1),
-        m_gbuffer->getColorFormat(2),
-        m_gbuffer->getColorFormat(3),
-        m_gbuffer->getColorFormat(4),
-    };
-    VkPipelineRenderingCreateInfo renderingInfo{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount = uint32_t(color_format.size()),
-        .pColorAttachmentFormats = color_format.data(),
-        .depthAttachmentFormat = m_gbuffer->getDepthFormat(),
-    };
-
-    // Creating the Pipeline
-    nvvk::GraphicsPipelineGeneratorCombined gpb(m_device, m_rasterPipepline->layout, {} /*m_offscreenRenderPass*/);
-    gpb.createInfo.pNext = &renderingInfo;
+    VkDescriptorSetLayout compositionSet = m_dset->getLayout();
 
     {
-        // composition
-        gpb.rasterizationState.cullMode = VK_CULL_MODE_FRONT_BIT;
-        gpb.addShader(m_shaderModules[mComposeVertex], VK_SHADER_STAGE_VERTEX_BIT);
-        gpb.addShader(m_shaderModules[mComposeFrag], VK_SHADER_STAGE_FRAGMENT_BIT);
-        m_rasterPipepline->plines.push_back(gpb.createPipeline());
-        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[mComposition]);
+        // Creating the Pipeline Layout for mrt
+        std::vector<VkDescriptorSetLayout> layouts{ sceneSet }; // , hdrDomeSet, skySet
+        const VkPushConstantRange pushConstantRanges = { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                                        .offset = 0,
+                                                        .size = sizeof(DH::PushConstantRaster) };
+        VkPipelineLayoutCreateInfo create_info{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = static_cast<uint32_t>(layouts.size()),
+            .pSetLayouts = layouts.data(),
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushConstantRanges,
+        };
+        vkCreatePipelineLayout(m_device, &create_info, nullptr, &m_rasterPipeplineMRT->layout);
     }
-
-    /*
-    gltf_scene_vk:
-        nvvk::Buffer position;
-        nvvk::Buffer normal;
-        nvvk::Buffer tangent;
-        nvvk::Buffer texCoord0;
-        nvvk::Buffer texCoord1;
-        nvvk::Buffer color;
-    */
-    // 参考gltf_scene_vk.cpp - 499
-    gpb.addBindingDescriptions({ 
-        {0, sizeof(glm::vec3)}, // pos
-        {1, sizeof(glm::vec3)}, // normal
-        {2, sizeof(glm::vec4)}, // color
-        {3, sizeof(glm::vec4)}, // tangent
-        {4, sizeof(glm::vec2)}, // texCoord0
-    });// binding = 0, stride = vec3
-    
-    gpb.addAttributeDescriptions({
-        {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0}, // pos
-        {1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0}, // normal
-        {2, 2, VK_FORMAT_R8G8B8A8_UNORM, 0}, // color
-        {3, 3, VK_FORMAT_R32G32B32A32_SFLOAT, 0}, // tangent
-        {4, 4, VK_FORMAT_R32G32_SFLOAT, 0}, // texCoord
-        // Position(location, binding, format, offset)
-        });
-
     {
+        // for composition:
+        std::vector<VkDescriptorSetLayout> layouts{ sceneSet }; // , hdrDomeSet, skySet
+        const VkPushConstantRange pushConstantRanges = { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                                        .offset = 0,
+                                                        .size = sizeof(DH::PushConstantRaster) };
+        VkPipelineLayoutCreateInfo create_info{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = static_cast<uint32_t>(layouts.size()),
+            .pSetLayouts = layouts.data(),
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushConstantRanges,
+        };
+        vkCreatePipelineLayout(m_device, &create_info, nullptr, &m_rasterPipeplineCOMP->layout);
+    }
+    
+    {
+        std::vector<VkFormat>         color_format = { 
+            m_gbuffer->getColorFormat(0),
+            m_gbuffer->getColorFormat(1),
+            m_gbuffer->getColorFormat(2),
+            m_gbuffer->getColorFormat(3),
+            m_gbuffer->getColorFormat(4),
+        };
+        VkPipelineRenderingCreateInfo renderingInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+            .colorAttachmentCount = uint32_t(color_format.size()),
+            .pColorAttachmentFormats = color_format.data(),
+            .depthAttachmentFormat = m_gbuffer->getDepthFormat(),
+        };
+
+        // Creating the Pipeline for mrt
+        nvvk::GraphicsPipelineGeneratorCombined gpb(m_device, m_rasterPipeplineMRT->layout, {} /*m_offscreenRenderPass*/);
+        gpb.createInfo.pNext = &renderingInfo;
+ 
+        // 参考gltf_scene_vk.cpp - 499
+        gpb.addBindingDescriptions({ 
+            {0, sizeof(glm::vec3)}, // pos
+            {1, sizeof(glm::vec3)}, // normal
+            {2, sizeof(glm::vec4)}, // color
+            {3, sizeof(glm::vec4)}, // tangent
+            {4, sizeof(glm::vec2)}, // texCoord0
+        });// binding = 0, stride = vec3
+    
+        gpb.addAttributeDescriptions({
+            {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0}, // pos
+            {1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0}, // normal
+            {2, 2, VK_FORMAT_R8G8B8A8_UNORM, 0}, // color
+            {3, 3, VK_FORMAT_R32G32B32A32_SFLOAT, 0}, // tangent
+            {4, 4, VK_FORMAT_R32G32_SFLOAT, 0}, // texCoord
+            // Position(location, binding, format, offset)
+            });
+
+
         // Solid
         gpb.rasterizationState.depthBiasEnable = VK_TRUE;
         gpb.rasterizationState.depthBiasConstantFactor = -1;
@@ -535,14 +654,40 @@ void RendererDDGIRaster::createRasterPipeline(Resources& res, Scene& scene)
 
         gpb.addShader(m_shaderModules[mDeferVertex  ], VK_SHADER_STAGE_VERTEX_BIT);
         gpb.addShader(m_shaderModules[mDeferFrag    ], VK_SHADER_STAGE_FRAGMENT_BIT);
-        m_rasterPipepline->plines.push_back(gpb.createPipeline());
-        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[mDeferredSolid]);
+        m_rasterPipeplineMRT->plines.push_back(gpb.createPipeline());
+        m_dbgUtil->DBG_NAME(m_rasterPipeplineMRT->plines[mDeferredSolid]);
         // Double Sided
         gpb.rasterizationState.cullMode = VK_CULL_MODE_NONE;
-        m_rasterPipepline->plines.push_back(gpb.createPipeline());
-        m_dbgUtil->DBG_NAME(m_rasterPipepline->plines[mDeferredDoubleSided]);
+        m_rasterPipeplineMRT->plines.push_back(gpb.createPipeline());
+        m_dbgUtil->DBG_NAME(m_rasterPipeplineMRT->plines[mDeferredDoubleSided]);
     }
 
+
+    {
+        // for composition
+        std::vector<VkFormat>         color_format = {
+            m_gSimpleBuffers->getColorFormat(0),
+        };
+        VkPipelineRenderingCreateInfo renderingInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+            .colorAttachmentCount = uint32_t(color_format.size()),
+            .pColorAttachmentFormats = color_format.data(),
+            .depthAttachmentFormat = m_gSimpleBuffers->getDepthFormat(),
+        };
+
+        nvvk::GraphicsPipelineGeneratorCombined gpb(m_device, m_rasterPipeplineCOMP->layout, {} /*m_offscreenRenderPass*/);
+        gpb.createInfo.pNext = &renderingInfo;
+
+        // Solid
+        gpb.rasterizationState.depthBiasEnable = VK_FALSE;
+        gpb.setBlendAttachmentCount(uint32_t(color_format.size()));  
+
+        gpb.addShader(m_shaderModules[mComposeVertex], VK_SHADER_STAGE_VERTEX_BIT);
+        gpb.addShader(m_shaderModules[mComposeFrag], VK_SHADER_STAGE_FRAGMENT_BIT);
+        m_rasterPipeplineMRT->plines.push_back(gpb.createPipeline());
+        m_dbgUtil->DBG_NAME(m_rasterPipeplineMRT->plines[0]);
+       
+    }
     
     // Cleanup
     vkDestroyShaderModule(m_device, m_shaderModules[eVertex], nullptr);
@@ -639,7 +784,7 @@ void RendererDDGIRaster::renderNodes(VkCommandBuffer cmd, Scene& scene, const st
         m_pushConst.renderNodeID = static_cast<int>(nodeID);
         m_pushConst.selectedRenderNode = scene.getSelectedRenderNode();
 
-        vkCmdPushConstants(cmd, m_rasterPipepline->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        vkCmdPushConstants(cmd, m_rasterPipeplineMRT->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             0, sizeof(DH::PushConstantRaster), &m_pushConst);
         vkCmdBindVertexBuffers(cmd, 0, 1, &scene.m_gltfSceneVk->vertexBuffers()[renderNode.renderPrimID].position.buffer, offsets);
         vkCmdBindIndexBuffer(cmd, scene.m_gltfSceneVk->indices()[renderNode.renderPrimID].buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -666,17 +811,17 @@ void RendererDDGIRaster::renderRasterScene(VkCommandBuffer cmd, Scene& scene)
 
 
     std::vector dset = { scene.m_sceneDescriptorSet}; // , scene.m_hdrDome->getDescSet(), scene.m_sky->getDescriptorSet() 
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipepline->layout, 0,
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipeplineMRT->layout, 0,
         static_cast<uint32_t>(dset.size()), dset.data(), 0, nullptr);
     // Draw solid
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipepline->plines[eRasterSolid]);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipeplineMRT->plines[mDeferredSolid]);
     renderNodes(cmd, scene, scene.m_gltfScene->getShadedNodes(nvh::gltf::Scene::eRasterSolid));
     //
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipepline->plines[eRasterSolidDoubleSided]);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipeplineMRT->plines[mDeferredDoubleSided]);
     renderNodes(cmd, scene, scene.m_gltfScene->getShadedNodes(nvh::gltf::Scene::eRasterSolidDoubleSided));
     // Draw blend-able
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipepline->plines[eRasterBlend]);
-    renderNodes(cmd, scene, scene.m_gltfScene->getShadedNodes(nvh::gltf::Scene::eRasterBlend));
+    // vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rasterPipepline->plines[eRasterBlend]);
+    // renderNodes(cmd, scene, scene.m_gltfScene->getShadedNodes(nvh::gltf::Scene::eRasterBlend));
 
 }
 
