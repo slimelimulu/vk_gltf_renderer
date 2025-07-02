@@ -120,6 +120,8 @@ namespace gltfr {
         };
         std::vector<shaderc::SpvCompilationResult>    m_spvShader;
         std::array<VkShaderModule, eShaderGroupCount> m_shaderModules{};
+        std::unique_ptr<nvvk::DescriptorSetContainer>  m_dset;  // Descriptor set
+        std::vector<VkDescriptorImageInfo> m_gBufferDescriptor;
 
         VkCommandBuffer m_recordedSceneCmd{ VK_NULL_HANDLE };
         VkDevice        m_device{ VK_NULL_HANDLE };
@@ -198,7 +200,7 @@ bool RendererDDGIRaster::init(Resources& res, Scene& scene)
     m_device = res.ctx.device;
     m_commandPool = res.m_tempCommandPool->getCommandPool();
     m_dbgUtil = std::make_unique<nvvk::DebugUtil>(m_device);
-
+    m_dset = std::make_unique<nvvk::DescriptorSetContainer>(m_device);
     if (!initShaders(res, false))
     {
         return false;
@@ -207,6 +209,12 @@ bool RendererDDGIRaster::init(Resources& res, Scene& scene)
     m_gSimpleBuffers = std::make_unique<nvvkhl::GBuffer>(m_device, res.m_allocator.get());
     m_gbuffer = std::make_unique<nvvkhl::GBuffer>(m_device, res.m_allocator.get());
     createGBuffer(res, scene);
+    m_gBufferDescriptor.reserve(5);
+    auto const & resource = m_gbuffer->getResources();
+    for (int i = 0; i < m_gBufferDescriptor.size(); ++i)
+    {
+        m_gBufferDescriptor.emplace_back(resource.descriptor[i]);
+    }
     createRasterPipeline(res, scene);
 
     return true;
@@ -217,8 +225,10 @@ bool RendererDDGIRaster::init(Resources& res, Scene& scene)
 //
 void RendererDDGIRaster::deinit()
 {
+    m_dset->deinit();
     if (m_rasterPipepline)
         m_rasterPipepline->destroy(m_device);
+
     m_rasterPipepline.reset();
 }
 
@@ -247,7 +257,8 @@ void RendererDDGIRaster::createGBuffer(Resources& res, Scene& scene)
 
     //scene.m_sky->setOutImage(m_gSimpleBuffers->getDescriptorImageInfo());
     //scene.m_hdrDome->setOutImage(m_gSimpleBuffers->getDescriptorImageInfo());
-}
+    // create texture for gbuffer
+
 
 //--------------------------------------------------------------------------------------------------
 // Rendering the scene
@@ -427,6 +438,23 @@ void RendererDDGIRaster::createRasterPipeline(Resources& res, Scene& scene)
     VkDescriptorSetLayout sceneSet = scene.m_sceneDescriptorSetLayout;
     VkDescriptorSetLayout hdrDomeSet = scene.m_hdrDome->getDescLayout();
     VkDescriptorSetLayout skySet = scene.m_sky->getDescriptorSetLayout();
+    // Create descriptorlayout for composition
+
+    m_dset->addBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+    m_dset->addBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+    m_dset->addBinding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+    m_dset->addBinding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+    m_dset->addBinding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+    m_dset->initLayout();
+    m_dset->initPool(1);  // two frames - allow to change on the fly
+
+    // writing to descriptors
+    std::vector<VkWriteDescriptorSet> writes;
+    std::vector<VkDescriptorImageInfo> descImageInfos;
+    
+
+
+    writes.emplace_back(m_dest->makeWrite(0, 0, &m_gbuffer->desc));
 
     // Creating the Pipeline Layout
     std::vector<VkDescriptorSetLayout> layouts{ sceneSet }; // , hdrDomeSet, skySet
