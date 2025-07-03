@@ -68,9 +68,9 @@ void main()
   RenderNode renderNode = RenderNodeBuf(sceneDesc.renderNodeAddress)._[pc.renderNodeID];
   OUT.pos               = vec3(renderNode.objectToWorld * vec4(ipos.xyz, 1.0));
   gl_Position           = frameInfo.projMatrix * frameInfo.viewMatrix * vec4(OUT.pos, 1.0);
-  OUT.normal = inormal;
+  OUT.normal = normalize(mat3(renderNode.worldToObject) * inormal);
   OUT.color = icolor;
-  OUT.tangent = itangent;
+  OUT.tangent = normalize(mat3(renderNode.worldToObject) * itangent);
   OUT.texCoord = itexCoord;
 
 }
