@@ -36,7 +36,8 @@ layout(location = 0) in Interpolants {
 layout(location = 0) out vec4 pos;
 layout(location = 1) out vec4 normal;
 layout(location = 2) out vec4 albedo;
-layout(location = 3) out vec4 material;
+layout(location = 3) out vec4 tangent;
+layout(location = 4) out int materialID;
 // 应该直接采样返回color layout(location = 4) out vec2 uv; 
 
 layout(buffer_reference, scalar) readonly buffer RenderNodeBuf      { RenderNode _[]; };
@@ -47,15 +48,15 @@ layout(set = 0, binding = eFrameInfo, scalar) uniform FrameInfo_ { SceneFrameInf
 layout(set = 0, binding = eSceneDesc) readonly buffer SceneDesc_ { SceneDescription sceneDesc; } ;
 layout(set = 0, binding = eTextures) uniform sampler2D[] texturesMap;
 void main(){
-  // 取材质
+  // 取材质id
   RenderNode renderNode = RenderNodeBuf(sceneDesc.renderNodeAddress)._[pc.renderNodeID];
   GltfShadeMaterial gltfMat = GltfMaterialBuf(sceneDesc.materialAddress).m[renderNode.materialID];
 
 	pos = vec4(IN.pos, 1.0f);
   normal = normalize(IN.normal) * 2.0f - 1.0f;
   tangent = normalize(IN.tangent) * 2.0f - 1.0f;
-  albedo = IN.color * gltfMat.pbrBaseColorFactor; // 它还真用了texturemap，注意（pbr_mat_eval.h）
-
+  albedo = IN.color; // 它还真用了texturemap，注意（pbr_mat_eval.h）
+  materialID = renderNode.materialID;
   
 
 }	
