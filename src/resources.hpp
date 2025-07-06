@@ -49,7 +49,7 @@ using namespace glm;
 #include <nvvkgltf/scene.hpp>
 #include <nvvkgltf/scene_rtx.hpp>
 #include <nvvkgltf/scene_vk.hpp>
-
+#include <nvvkglsl/glsl.hpp>
 enum class RenderingMode
 {
   ePathtracer,
@@ -98,6 +98,13 @@ struct Resources
     eImgSelection,
   };
 
+  enum class EGbuffer : uint32_t {
+      epos,
+      enorm,
+      euv,
+      eNumOfBuffer
+  };
+
   VkInstance              instance{};
   nvvk::ResourceAllocator allocator{};  // Vulkan Memory Allocator
   nvvk::StagingUploader   staging;
@@ -105,6 +112,7 @@ struct Resources
   nvvk::SamplerPool      samplerPool{};    // Texture Sampler Pool
   VkCommandPool          commandPool{};    // Command pool for secondary command buffer
   nvslang::SlangCompiler slangCompiler{};  // Slang compiler
+  nvvkglsl::GlslCompiler       glslCompiler{};   // gksl compiler
 
   // Scene
   nvvkgltf::Scene    scene;     // GLTF Scene
@@ -115,6 +123,7 @@ struct Resources
   nvvk::HdrIbl                                hdrIbl;  // HDR environment map
   nvshaders::HdrEnvDome                       hdrDome;
   nvvk::GBuffer                               gBuffers;          // G-Buffers: color + depth
+  nvvk::GBuffer                               gBuffersDefer;
   nvvk::Buffer                                bFrameInfo;        // Scene/Frame information
   nvvk::Buffer                                bSkyParams;        // Sky parameters
   shaderio::SkyPhysicalParameters             skyParams{};       // Sky parameters
@@ -127,7 +136,9 @@ struct Resources
   std::array<VkDescriptorSetLayout, 2>    descriptorSetLayout{};  // Descriptor set layout
   VkDescriptorSet                         descriptorSet{};        // Descriptor set for the textures
   VkDescriptorPool                        descriptorPool{};
-
+  nvvk::DescriptorBindings descirptorBindingGbuffer;
+  VkDescriptorSet gbufferDescSet{}; // for gbuffer
+  VkDescriptorSetLayout gbufferDescSetlayout{};
 
   int frameCount{0};
   int selectedObject{-1};  // Selected object in the scene

@@ -182,6 +182,24 @@ void GltfRenderer::onAttach(nvapp::Application* app)
     nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
   }
 
+  m_resources.gBuffersDefer.init({ .allocator = &m_resources.allocator,
+                            .colorFormats =
+                                {
+                                    VK_FORMAT_R32G32B32A32_SFLOAT,       // POSITION
+                                    VK_FORMAT_R32G32B32A32_SFLOAT,  // NORMAL + intAsFloat(materialid)
+                                    VK_FORMAT_R32G32B32A32_SFLOAT,             // texCoord.xy, 0, 0
+                                },
+                            .depthFormat = nvvk::findDepthFormat(app->getPhysicalDevice()),
+                            .imageSampler = linearSampler,
+                            .descriptorPool = m_app->getTextureDescriptorPool() });
+  {
+      VkCommandBuffer cmd{};
+      nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
+      m_resources.gBuffersDefer.update(cmd, { 100, 100 });
+      nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
+  }
+
+
   // ===== Rendering Utilities =====
 
   // Ray picker
@@ -226,6 +244,26 @@ void GltfRenderer::onAttach(nvapp::Application* app)
 #endif
   }
 
+  // ===== GLSL Compilation =====
+  {
+      SCOPED_TIMER("Shader GLSL");
+      using namespace nvvkglsl;
+      m_resources.glslCompiler.addSearchPaths(nvsamples::getShaderDirs());
+      m_resources.glslCompiler.defaultTarget();
+      m_resources.glslCompiler.defaultOptions();
+      //m_resources.glslCompiler.addOption(
+      //    { CompilerOptionName::DebugInformation, {CompilerOptionValueKind::Int, SLANG_DEBUG_INFO_LEVEL_MAXIMAL} });
+      //m_resources.glslCompiler.addOption(
+      //    { CompilerOptionName::Optimization, {CompilerOptionValueKind::Int, SLANG_OPTIMIZATION_LEVEL_DEFAULT} });
+
+#if defined(AFTERMATH_AVAILABLE)
+      // This aftermath callback is used to report the shader hash (Spirv) to the Aftermath library.
+      m_resources.slangCompiler.setCompileCallback([&](const std::filesystem::path& sourceFile, const uint32_t* spirvCode, size_t spirvSize) {
+          std::span<const uint32_t> data(spirvCode, spirvSize / sizeof(uint32_t));
+          AftermathCrashTracker::getInstance().addShaderBinary(data);
+          });
+#endif
+  }
   // ===== Renderer Initialization =====
 
   // Create resources
@@ -256,6 +294,7 @@ void GltfRenderer::onDetach()
 void GltfRenderer::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
 {
   m_resources.gBuffers.update(cmd, size);
+  m_resources.gBuffersDefer.update(cmd, size);
   m_pathTracer.onResize(cmd, size, m_resources);
   m_rasterizer.onResize(cmd, size, m_resources);
   m_resources.hdrDome.setOutImage(m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered));
@@ -624,6 +663,16 @@ void GltfRenderer::clearGbuffer(VkCommandBuffer cmd)
   VkImageSubresourceRange range      = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1};
   vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), VK_IMAGE_LAYOUT_GENERAL,
                        &clearValue, 1, &range);
+  
+  const VkClearColorValue clearValue = { {0.0f, 0.0f, 0.0f, 1.f} };
+  VkImageSubresourceRange range = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 };
+  vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(static_cast<uint32_t>(Resources::EGbuffer::epos)), VK_IMAGE_LAYOUT_GENERAL,
+      &clearValue, 1, &range);
+  vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(static_cast<uint32_t>(Resources::EGbuffer::enorm)), VK_IMAGE_LAYOUT_GENERAL,
+      &clearValue, 1, &range);
+  vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(static_cast<uint32_t>(Resources::EGbuffer::euv)), VK_IMAGE_LAYOUT_GENERAL,
+      &clearValue, 1, &range);
+
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -710,6 +759,34 @@ void GltfRenderer::createDescriptorSets()
   NVVK_CHECK(m_resources.descriptorBinding[1].createDescriptorSetLayout(m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
                                                                         &m_resources.descriptorSetLayout[1]));
   NVVK_DBG_NAME(m_resources.descriptorSetLayout[1]);
+
+  // 给Gbuffer也创建，用于composition阶段
+  m_resources.descirptorBindingGbuffer.addBinding((uint32_t)Resources::EGbuffer::epos, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      1, VK_SHADER_STAGE_ALL, nullptr,
+      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
+      | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
+  m_resources.descirptorBindingGbuffer.addBinding((uint32_t)Resources::EGbuffer::enorm, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      1, VK_SHADER_STAGE_ALL, nullptr,
+      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
+      | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
+  m_resources.descirptorBindingGbuffer.addBinding((uint32_t)Resources::EGbuffer::euv, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      1, VK_SHADER_STAGE_ALL, nullptr,
+      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
+      | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
+  NVVK_CHECK(m_resources.descirptorBindingGbuffer.createDescriptorSetLayout(
+      m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, &m_resources.gbufferDescSetlayout));
+  NVVK_DBG_NAME(m_resources.gbufferDescSetlayout);
+
+  VkDescriptorSetAllocateInfo allocInfo = {
+    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+    .descriptorPool = m_resources.descriptorPool,
+    .descriptorSetCount = 1,
+    .pSetLayouts = &m_resources.gbufferDescSetlayout,
+  };
+  NVVK_CHECK(vkAllocateDescriptorSets(m_device, &allocInfo, &m_resources.gbufferDescSet));
+  NVVK_DBG_NAME(m_resources.gbufferDescSet);
+
+
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -874,6 +951,7 @@ void GltfRenderer::destroyResources()
 
   m_resources.tonemapper.deinit();
   m_resources.gBuffers.deinit();
+  m_resources.gBuffersDefer.deinit();
   m_resources.sceneVk.deinit();
   m_resources.sceneRtx.deinit();
   m_resources.hdrIbl.deinit();
