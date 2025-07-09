@@ -124,6 +124,7 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg)
   // Register PathTracer-specific command line parameters
   m_pathTracer.registerParameters(paramReg);
   m_rasterizer.registerParameters(paramReg);
+  m_ddgirasterizer.registerParameters(paramReg);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -245,25 +246,25 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   }
 
   // ===== GLSL Compilation =====
-  {
-      SCOPED_TIMER("Shader GLSL");
-      using namespace nvvkglsl;
-      m_resources.glslCompiler.addSearchPaths(nvsamples::getShaderDirs());
-      m_resources.glslCompiler.defaultTarget();
-      m_resources.glslCompiler.defaultOptions();
-      //m_resources.glslCompiler.addOption(
-      //    { CompilerOptionName::DebugInformation, {CompilerOptionValueKind::Int, SLANG_DEBUG_INFO_LEVEL_MAXIMAL} });
-      //m_resources.glslCompiler.addOption(
-      //    { CompilerOptionName::Optimization, {CompilerOptionValueKind::Int, SLANG_OPTIMIZATION_LEVEL_DEFAULT} });
-
-#if defined(AFTERMATH_AVAILABLE)
-      // This aftermath callback is used to report the shader hash (Spirv) to the Aftermath library.
-      m_resources.slangCompiler.setCompileCallback([&](const std::filesystem::path& sourceFile, const uint32_t* spirvCode, size_t spirvSize) {
-          std::span<const uint32_t> data(spirvCode, spirvSize / sizeof(uint32_t));
-          AftermathCrashTracker::getInstance().addShaderBinary(data);
-          });
-#endif
-  }
+//   {
+//       SCOPED_TIMER("Shader GLSL");
+//       using namespace nvvkglsl;
+//       m_resources.glslCompiler.addSearchPaths(nvsamples::getShaderDirs());
+//       m_resources.glslCompiler.defaultTarget();
+//       m_resources.glslCompiler.defaultOptions();
+//       //m_resources.glslCompiler.addOption(
+//       //    { CompilerOptionName::DebugInformation, {CompilerOptionValueKind::Int, SLANG_DEBUG_INFO_LEVEL_MAXIMAL} });
+//       //m_resources.glslCompiler.addOption(
+//       //    { CompilerOptionName::Optimization, {CompilerOptionValueKind::Int, SLANG_OPTIMIZATION_LEVEL_DEFAULT} });
+// 
+// #if defined(AFTERMATH_AVAILABLE)
+//       // This aftermath callback is used to report the shader hash (Spirv) to the Aftermath library.
+//       m_resources.slangCompiler.setCompileCallback([&](const std::filesystem::path& sourceFile, const uint32_t* spirvCode, size_t spirvSize) {
+//           std::span<const uint32_t> data(spirvCode, spirvSize / sizeof(uint32_t));
+//           AftermathCrashTracker::getInstance().addShaderBinary(data);
+//           });
+// #endif
+//   }
   // ===== Renderer Initialization =====
 
   // Create resources
@@ -274,9 +275,11 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   // Initialize the renderers
   m_pathTracer.onAttach(m_resources, &m_profilerGpuTimer);
   m_rasterizer.onAttach(m_resources, &m_profilerGpuTimer);
+  m_ddgirasterizer.onAttach(m_resources, &m_profilerGpuTimer);
 
   m_pathTracer.createPipeline(m_resources);
   m_rasterizer.createPipeline(m_resources);
+  m_ddgirasterizer.createPipeline(m_resources);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -286,6 +289,7 @@ void GltfRenderer::onDetach()
   vkDeviceWaitIdle(m_device);
   m_pathTracer.onDetach(m_resources);
   m_rasterizer.onDetach(m_resources);
+  m_ddgirasterizer.onDetach(m_resources);
   destroyResources();
 }
 
@@ -297,6 +301,7 @@ void GltfRenderer::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
   m_resources.gBuffersDefer.update(cmd, size);
   m_pathTracer.onResize(cmd, size, m_resources);
   m_rasterizer.onResize(cmd, size, m_resources);
+  m_ddgirasterizer.onResize(cmd, size, m_resources);
   m_resources.hdrDome.setOutImage(m_resources.gBuffers.getDescriptorImageInfo(Resources::eImgRendered));
 
   resetFrame();  // Reset frame to restart the rendering
@@ -403,6 +408,9 @@ void GltfRenderer::onRender(VkCommandBuffer cmd)
       case RenderingMode::eRasterizer:
         m_rasterizer.onRender(cmd, m_resources);
         break;
+      case RenderingMode::eDDGIRasterizer:
+          m_ddgirasterizer.onRender(cmd, m_resources);
+          break;
     }
   }
 
@@ -444,6 +452,7 @@ void GltfRenderer::onFileDrop(const std::filesystem::path& filename)
     m_resources.selectedObject = -1;   // Reset the selected object
     m_uiSceneGraph.setModel(nullptr);  // Reset the UI model
     m_rasterizer.freeRecordCommandBuffer();
+    m_ddgirasterizer.freeRecordCommandBuffer();
 
     std::filesystem::path loadFile = filename;
     std::thread([=, this]() {
@@ -664,14 +673,14 @@ void GltfRenderer::clearGbuffer(VkCommandBuffer cmd)
   vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(Resources::eImgTonemapped), VK_IMAGE_LAYOUT_GENERAL,
                        &clearValue, 1, &range);
   
-  const VkClearColorValue clearValue = { {0.0f, 0.0f, 0.0f, 1.f} };
-  VkImageSubresourceRange range = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 };
+  const VkClearColorValue clearValue1 = { {0.0f, 0.0f, 0.0f, 1.f} };
+  range = VkImageSubresourceRange{ .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 };
   vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(static_cast<uint32_t>(Resources::EGbuffer::epos)), VK_IMAGE_LAYOUT_GENERAL,
-      &clearValue, 1, &range);
+      &clearValue1, 1, &range);
   vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(static_cast<uint32_t>(Resources::EGbuffer::enorm)), VK_IMAGE_LAYOUT_GENERAL,
-      &clearValue, 1, &range);
+      &clearValue1, 1, &range);
   vkCmdClearColorImage(cmd, m_resources.gBuffers.getColorImage(static_cast<uint32_t>(Resources::EGbuffer::euv)), VK_IMAGE_LAYOUT_GENERAL,
-      &clearValue, 1, &range);
+      &clearValue1, 1, &range);
 
 }
 
@@ -777,7 +786,7 @@ void GltfRenderer::createDescriptorSets()
       m_device, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, &m_resources.gbufferDescSetlayout));
   NVVK_DBG_NAME(m_resources.gbufferDescSetlayout);
 
-  VkDescriptorSetAllocateInfo allocInfo = {
+  allocInfo = VkDescriptorSetAllocateInfo{
     .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
     .descriptorPool = m_resources.descriptorPool,
     .descriptorSetCount = 1,
@@ -798,9 +807,12 @@ void GltfRenderer::compileShaders()
   {
     m_pathTracer.compileShader(m_resources);
   }
-  else
+  else if (m_resources.settings.renderSystem == RenderingMode::eRasterizer)
   {
     m_rasterizer.compileShader(m_resources);
+  }
+  else {
+      m_ddgirasterizer.compileShader(m_resources);
   }
 }
 

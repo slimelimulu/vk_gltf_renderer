@@ -81,6 +81,7 @@ source_group("Shaders/Shared" FILES ${SHADER_SHARED_SLANG_FILES})
 # This allow to compile the shaders when the executable is built
 target_sources(${PROJECT_NAME} PRIVATE ${GENERATED_SHADER_HEADERS} ${SHADER_H_FILES})
 
+# Add shaderc
 
 
 #####################################################################################

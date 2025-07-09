@@ -44,9 +44,11 @@ private:
 	VkDevice         m_device{};                 // Vulkan device
 	VkCommandBuffer  m_recordedSceneCmd{};       // Command buffer for recording the scene
 	VkCommandPool    m_commandPool{};            // Command pool for recording the scene
-	VkPipelineLayout m_graphicPipelineLayout{};  // The pipeline layout use with graphics pipeline
+	VkPipelineLayout m_MRTPipelineLayout{};  // The pipeline layout use with graphics pipeline
+	VkPipelineLayout m_COMPPipelineLayout{};  // The pipeline layout use with graphics pipeline
 
-	nvvk::GraphicsPipelineState m_dynamicPipeline;  // Graphics pipeline state
+	nvvk::GraphicsPipelineState m_MRTPipeline;  // Graphics pipeline state
+	nvvk::GraphicsPipelineState m_COMPPipeline;  // Graphics pipeline state
 	nvvk::DescriptorBindings    m_descBind;         // Descriptor bindings
 
 	shaderio::RasterPushConstant m_pushConst{};  // Reusing the same push constant structure for now

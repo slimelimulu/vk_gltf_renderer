@@ -192,7 +192,7 @@ void GltfRendererUI::renderUI(GltfRenderer& renderer)
       // Add renderer selection at the top level of the Settings panel for better visibility
       if(PE::begin())
       {
-        static const char* rendererItems[] = {"Path Tracer", "Rasterizer"};
+        static const char* rendererItems[] = {"Path Tracer", "Rasterizer", "DDGIRasterizer"};
         int                currentItem     = static_cast<int>(renderer.m_resources.settings.renderSystem);
         if(PE::Combo("Active Renderer", &currentItem, rendererItems, IM_ARRAYSIZE(rendererItems)))
         {
@@ -214,10 +214,14 @@ void GltfRendererUI::renderUI(GltfRenderer& renderer)
             PE::end();
           }
         }
-        else
+        else if(renderer.m_resources.settings.renderSystem == RenderingMode::eRasterizer)
         {
           if(headerManager.beginHeader("Rasterizer"))
             changed |= renderer.m_rasterizer.onUIRender(renderer.m_resources);
+        }
+        else {
+            if (headerManager.beginHeader("DDGIRasterizer"))
+                changed |= renderer.m_ddgirasterizer.onUIRender(renderer.m_resources);
         }
       }
       ImGui::Separator();
@@ -544,4 +548,5 @@ void GltfRendererUI::renderMenu(GltfRenderer& renderer)
   // Let both renderers handle their menus
   renderer.m_pathTracer.onUIMenu();
   renderer.m_rasterizer.onUIMenu();
+  renderer.m_ddgirasterizer.onUIMenu();
 }

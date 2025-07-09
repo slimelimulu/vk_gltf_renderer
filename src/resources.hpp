@@ -49,11 +49,12 @@ using namespace glm;
 #include <nvvkgltf/scene.hpp>
 #include <nvvkgltf/scene_rtx.hpp>
 #include <nvvkgltf/scene_vk.hpp>
-#include <nvvkglsl/glsl.hpp>
+//#include <nvvkglsl/glsl.hpp>
 enum class RenderingMode
 {
-  ePathtracer,
-  eRasterizer
+    ePathtracer,
+    eRasterizer,
+    eDDGIRasterizer
 };
 
 enum DirtyFlags
@@ -112,7 +113,7 @@ struct Resources
   nvvk::SamplerPool      samplerPool{};    // Texture Sampler Pool
   VkCommandPool          commandPool{};    // Command pool for secondary command buffer
   nvslang::SlangCompiler slangCompiler{};  // Slang compiler
-  nvvkglsl::GlslCompiler       glslCompiler{};   // gksl compiler
+  // nvvkglsl::GlslCompiler       glslCompiler{};   // gksl compiler
 
   // Scene
   nvvkgltf::Scene    scene;     // GLTF Scene

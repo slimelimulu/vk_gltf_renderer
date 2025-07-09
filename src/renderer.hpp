@@ -51,6 +51,7 @@ using namespace glm;
 
 #include "renderer_pathtracer.hpp"
 #include "renderer_rasterizer.hpp"
+#include "render_ddgiRaster.hpp"
 #include "resources.hpp"
 #include "silhouette.hpp"
 #include "ui_animation_control.hpp"
@@ -116,6 +117,7 @@ private:
   Resources  m_resources;
   PathTracer m_pathTracer;  // Path tracer renderer
   Rasterizer m_rasterizer;  // Rasterizer renderer
+  DDGIRasterizer m_ddgirasterizer;
 
   UiSceneGraph     m_uiSceneGraph;  // Model UI
   BusyWindow       m_busy;
