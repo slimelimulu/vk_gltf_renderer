@@ -17,11 +17,11 @@
 [[vk::push_constant]] ConstantBuffer<RasterPushConstant> pushConst;
 
 struct VertexInput {
-    [[vk::binding(0)]]
+    [[vk::location(0), vk::binding(0)]]
     float3 position : POSITION;
-    [[vk::binding(1)]]
+    [[vk::location(1), vk::binding(1)]]
     float3 normal : NORMAL;
-    [[vk::binding(2)]]
+    [[vk::location(2), vk::binding(2)]]
     float3 uv : TEXCOORD;
 }
 
@@ -55,7 +55,7 @@ VertexOutput MRTvertexMain(VertexInput input) {
 }
 
 [shader("fragment")]
-PixelOutput MRTFragmentMain(VertexOutput input) {
+PixelOutput MRTfragmentMain(VertexOutput input) {
     PixelOutput output;
     output.position = float4(1.0f, 0.0f, 0.0f, 1.0f);
     output.normal_id = float4(0.0f, 1.0f, 0.0f, 1.0f);

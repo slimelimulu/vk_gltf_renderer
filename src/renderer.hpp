@@ -104,7 +104,7 @@ private:
   void updateHdrImages();
 
   bool updateSceneChanges(VkCommandBuffer cmd, bool didAnimate);
-
+  //void updateGBuffer(VkCommandBuffer cmd, VkExtent2D extent);
   //--------------------------------------------------------------------------------------------------
   //
   //

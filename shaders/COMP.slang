@@ -63,7 +63,7 @@ PSout COMPfragmentMain(PSin input)
   PSout  output;
   float2 uv = input.uv;
 
-  output.color = float4(1.0f, 0.5f, 0.5f, 1.0f);
+  output.color = float4(uv.x, uv.y, 0.05f, 1.0f);//worldPosTex.Sample(uv);
 
   return output;
 }

@@ -127,6 +127,10 @@ GltfRenderer::GltfRenderer(nvutils::ParameterRegistry* paramReg)
   m_ddgirasterizer.registerParameters(paramReg);
 }
 
+//void GltfRenderer::changeGbufferLayout() {}
+
+
+
 //--------------------------------------------------------------------------------------------------
 // The onAttach method is called when the application is attached to the renderer
 void GltfRenderer::onAttach(nvapp::Application* app)
@@ -197,9 +201,14 @@ void GltfRenderer::onAttach(nvapp::Application* app)
       VkCommandBuffer cmd{};
       nvvk::beginSingleTimeCommands(cmd, m_device, m_transientCmdPool);
       m_resources.gBuffersDefer.update(cmd, { 100, 100 });
+      nvvk::cmdImageMemoryBarrier(cmd, { m_resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::epos), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+      nvvk::cmdImageMemoryBarrier(cmd, { m_resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::enorm), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+      nvvk::cmdImageMemoryBarrier(cmd, { m_resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::euv), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+
       nvvk::endSingleTimeCommands(cmd, m_device, m_transientCmdPool, m_app->getQueue(0).queue);
   }
-
+  
+  
 
   // ===== Rendering Utilities =====
 
@@ -276,6 +285,7 @@ void GltfRenderer::onAttach(nvapp::Application* app)
   m_pathTracer.onAttach(m_resources, &m_profilerGpuTimer);
   m_rasterizer.onAttach(m_resources, &m_profilerGpuTimer);
   m_ddgirasterizer.onAttach(m_resources, &m_profilerGpuTimer);
+  
 
   m_pathTracer.createPipeline(m_resources);
   m_rasterizer.createPipeline(m_resources);
@@ -299,6 +309,10 @@ void GltfRenderer::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
 {
   m_resources.gBuffers.update(cmd, size);
   m_resources.gBuffersDefer.update(cmd, size);
+  nvvk::cmdImageMemoryBarrier(cmd, { m_resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::epos), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+  nvvk::cmdImageMemoryBarrier(cmd, { m_resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::enorm), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+  nvvk::cmdImageMemoryBarrier(cmd, { m_resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::euv), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+
   m_pathTracer.onResize(cmd, size, m_resources);
   m_rasterizer.onResize(cmd, size, m_resources);
   m_ddgirasterizer.onResize(cmd, size, m_resources);
@@ -795,6 +809,7 @@ void GltfRenderer::createDescriptorSets()
   NVVK_CHECK(vkAllocateDescriptorSets(m_device, &allocInfo, &m_resources.gbufferDescSet));
   NVVK_DBG_NAME(m_resources.gbufferDescSet);
 
+  
 
 }
 
@@ -821,16 +836,59 @@ void GltfRenderer::compileShaders()
 // Textures are updated in the descriptor set (0)
 void GltfRenderer::updateTextures()
 {
-  // Now do the textures
-  nvvk::WriteSetContainer write{};
-  VkWriteDescriptorSet allTextures = m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eTextures);
-  allTextures.dstSet               = m_resources.descriptorSet;
-  allTextures.descriptorCount      = m_resources.sceneVk.nbTextures();
-  if(allTextures.descriptorCount == 0)
-    return;
-  write.append(allTextures, m_resources.sceneVk.textures().data());
-  vkUpdateDescriptorSets(m_device, write.size(), write.data(), 0, nullptr);
+    {
+        // Now do the textures
+        nvvk::WriteSetContainer write{};
+        VkWriteDescriptorSet allTextures = m_resources.descriptorBinding[0].getWriteSet(shaderio::BindingPoints::eTextures);
+        allTextures.dstSet = m_resources.descriptorSet;
+        allTextures.descriptorCount = m_resources.sceneVk.nbTextures();
+        if (allTextures.descriptorCount == 0)
+            return;
+        write.append(allTextures, m_resources.sceneVk.textures().data());
+        vkUpdateDescriptorSets(m_device, write.size(), write.data(), 0, nullptr);
+    }
+
+    {
+        // 转换后，需要写到descriptorSet里面
+        std::vector<VkWriteDescriptorSet> writes{};
+        for (uint32_t i = 0; i < 3; i++) {
+            VkDescriptorImageInfo imageinfo = {
+                .sampler = m_resources.gBuffersDefer.getDescriptorImageInfo(i).sampler,
+                .imageView = m_resources.gBuffersDefer.getColorImageView(i),
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            };
+            VkWriteDescriptorSet write{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = nullptr,
+                .dstSet = m_resources.gbufferDescSet,
+                .dstBinding = i,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &imageinfo,
+                .pBufferInfo = nullptr,
+                .pTexelBufferView = nullptr
+            };
+        }
+        
+        vkUpdateDescriptorSets(m_device, writes.size(), writes.data(), 0, nullptr);
+    }
 }
+/*
+VkWriteDescriptorSet allTextures{};
+        allTextures.descriptorCount
+        allTextures.dstSet = m_resources.gbufferDescSet;
+        allTextures.descriptorCount = 1;
+        allTextures.dstBinding = 0;
+        VkImageLayout imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkSampler sampler = m_resources.gBuffersDefer.getDescriptorImageInfo(0).sampler;
+
+        write.append(allTextures, m_resources.gBuffersDefer.getColorImageView(0), imageLayout, sampler);
+        allTextures.dstBinding = 1;
+        write.append(allTextures, m_resources.gBuffersDefer.getColorImageView(1), imageLayout, sampler);
+        allTextures.dstBinding = 2;
+        write.append(allTextures, m_resources.gBuffersDefer.getColorImageView(2), imageLayout, sampler);
+*/
 
 //--------------------------------------------------------------------------------------------------
 // Update the HDR images : add the 2D images to allTextures and the cube images to allTexturesCube

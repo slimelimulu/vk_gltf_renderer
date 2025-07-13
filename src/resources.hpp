@@ -137,9 +137,22 @@ struct Resources
   std::array<VkDescriptorSetLayout, 2>    descriptorSetLayout{};  // Descriptor set layout
   VkDescriptorSet                         descriptorSet{};        // Descriptor set for the textures
   VkDescriptorPool                        descriptorPool{};
-  nvvk::DescriptorBindings descirptorBindingGbuffer;
-  VkDescriptorSet gbufferDescSet{}; // for gbuffer
+
+  // for gbuffer
+  struct{
+      std::vector<nvvk::Image>  gBufferColor{};
+      nvvk::Image               gBufferDepth{};
+      std::vector<VkImageView>  imageViews{};
+      VkSampler                 sampler;
+      VkExtent2D                size{};
+
+      
+  }gres;
   VkDescriptorSetLayout gbufferDescSetlayout{};
+  VkDescriptorSet gbufferDescSet{};
+  nvvk::DescriptorBindings descirptorBindingGbuffer{};
+  // for gbuffer
+  
 
   int frameCount{0};
   int selectedObject{-1};  // Selected object in the scene
