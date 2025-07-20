@@ -19,9 +19,9 @@
 
 // texture
 
-[[vk::binding(0, 1)]] Sampler2D worldPosTex;
-[[vk::binding(1, 1)]] Sampler2D normalMIDTex;
-[[vk::binding(2, 1)]] Sampler2D texCoordTex;
+[[vk::binding(0, 0)]] Sampler2D worldPosTex[];
+//[[vk::binding(1, 1)]] Sampler2D normalMIDTex;
+//[[vk::binding(2, 1)]] Sampler2D texCoordTex;
 
 struct PSin
 {
@@ -63,7 +63,7 @@ PSout COMPfragmentMain(PSin input)
   PSout  output;
   float2 uv = input.uv;
 
-  output.color = float4(uv.x, uv.y, 0.05f, 1.0f);//worldPosTex.Sample(uv);
+  output.color = float4(worldPosTex[0].Sample(uv).xyz, 1.0f); // float4(uv.x, uv.y, 0.05f, 1.0f);
 
   return output;
 }

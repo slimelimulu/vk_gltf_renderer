@@ -108,18 +108,18 @@ void DDGIRasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
 		}
 	}
 	// mrt，在gbufferDefer上
-	
+	nvvk::cmdImageMemoryBarrier(cmd, { resources.gBuffers.getColorImage(Resources::eImgRendered), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
 	{
 		VkRenderingAttachmentInfo renderingInfo_gbuffer = DEFAULT_VkRenderingAttachmentInfo;
 
-		renderingInfo_gbuffer.clearValue = { {{0.0f, 0.0f, 0.0f, 0.0f}} };
+		renderingInfo_gbuffer.clearValue = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
 		renderingInfo_gbuffer.loadOp = resources.settings.useSolidBackground ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		// 1 - Selection attachment
 
 		// Two attachments, one for color and one for selection
 		std::array<VkRenderingAttachmentInfo, 3> attachments = { {renderingInfo_gbuffer, renderingInfo_gbuffer, renderingInfo_gbuffer} };
 		// 0 - Color attachment
-		attachments[0].imageView = resources.gBuffersDefer.getColorImageView((uint32_t)Resources::EGbuffer::epos);
+		attachments[0].imageView = resources.gBuffersDefer.getColorImageView((uint32_t)Resources::EGbuffer::epos); //resources.gBuffers.getColorImageView(Resources::eImgRendered);
 		attachments[1].imageView = resources.gBuffersDefer.getColorImageView((uint32_t)Resources::EGbuffer::enorm);
 		attachments[2].imageView = resources.gBuffersDefer.getColorImageView((uint32_t)Resources::EGbuffer::euv);
 		// 1 - Selection attachment
@@ -167,22 +167,40 @@ void DDGIRasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
 		
 
 		vkCmdEndRendering(cmd);
+
+		// copy from defer to gbuffer:
+		//{
+		//	// Blit the selection image from the DLSS GBuffer (different resolution) to the Renderer GBuffer Selection
+		//	VkOffset3D  minCorner = { 0, 0, 0 };
+		//	VkImageBlit blitRegions{
+		//		.srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
+		//		.srcOffsets = {minCorner, {int(resources.gBuffersDefer.getSize().width), int(resources.gBuffersDefer.getSize().height), 1}},
+		//		.dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1},
+		//		.dstOffsets = {minCorner, {int(resources.gBuffers.getSize().width), int(resources.gBuffers.getSize().height), 1}},
+		//	};
+		//	vkCmdBlitImage(cmd, resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::epos),
+		//		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, resources.gBuffers.getColorImage(Resources::eImgRendered),
+		//		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 1, &blitRegions, VK_FILTER_LINEAR);
+		//}
+
 		nvvk::cmdImageMemoryBarrier(cmd, { resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::epos), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
 		nvvk::cmdImageMemoryBarrier(cmd, { resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::enorm), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
 		nvvk::cmdImageMemoryBarrier(cmd, { resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::euv), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
-
-
-		
-		
+	
 	}
+
+
+
+
+	nvvk::cmdImageMemoryBarrier(cmd, { resources.gBuffers.getColorImage(Resources::eImgRendered), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,  VK_IMAGE_LAYOUT_GENERAL });
 	// Composition - 在gbuffer上
 	{
 		VkRenderingAttachmentInfo renderingInfo_gbuffer = DEFAULT_VkRenderingAttachmentInfo;
-
+	
 		renderingInfo_gbuffer.clearValue = { {{0.0f, 0.0f, 0.0f, 0.0f}} };
 		renderingInfo_gbuffer.loadOp = resources.settings.useSolidBackground ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		// 1 - Selection attachment
-
+	
 		// Two attachments, one for color and one for selection
 		std::array<VkRenderingAttachmentInfo, 1> attachments = { {renderingInfo_gbuffer} };
 		// 0 - Color attachment
@@ -193,7 +211,7 @@ void DDGIRasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
 		VkRenderingAttachmentInfo depthAttachment = DEFAULT_VkRenderingAttachmentInfo;
 		depthAttachment.imageView = resources.gBuffers.getDepthImageView();
 		depthAttachment.clearValue = { .depthStencil = DEFAULT_VkClearDepthStencilValue };
-
+	
 		nvvk::cmdImageMemoryBarrier(cmd, { resources.gBuffers.getColorImage(Resources::eImgRendered), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
 		// Setting up the push constant
 		m_pushConst.frameInfo = (shaderio::SceneFrameInfo*)resources.bFrameInfo.address;
@@ -201,7 +219,7 @@ void DDGIRasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
 		m_pushConst.gltfScene = (shaderio::GltfScene*)resources.sceneVk.sceneDesc().address;
 		m_pushConst.mouseCoord = nvapp::ElementDbgPrintf::getMouseCoord();  // Use for debugging: printf in shader
 		vkCmdPushConstants(cmd, m_COMPPipelineLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(shaderio::RasterPushConstant), &m_pushConst);
-
+	
 		// Create the rendering info
 		VkRenderingInfo renderingInfo = DEFAULT_VkRenderingInfo;
 		renderingInfo.flags = m_useRecordedCmd ? VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT : 0,
@@ -209,10 +227,10 @@ void DDGIRasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
 		renderingInfo.colorAttachmentCount = uint32_t(attachments.size());
 		renderingInfo.pColorAttachments = attachments.data();
 		renderingInfo.pDepthAttachment = &depthAttachment;
-
+	
 		// ** BEGIN RENDERING **
 		vkCmdBeginRendering(cmd, &renderingInfo);
-
+	
 		{
 			
 			// All dynamic states are set here
@@ -220,9 +238,9 @@ void DDGIRasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
 			m_COMPPipeline.cmdSetViewportAndScissor(cmd, resources.gBuffers.getSize());
 			m_COMPPipeline.cmdBindShaders(cmd, { .vertex = m_COMPvertexShader, .fragment = m_COMPfragmentShader });
 			vkCmdSetDepthTestEnable(cmd, VK_TRUE);
-
+	
 			// Bind the descriptor set: textures (Set: 0)
-			std::array<VkDescriptorSet, 2> descriptorSets{ resources.descriptorSet, resources.gbufferDescSet };
+			std::array<VkDescriptorSet, 2> descriptorSets{ resources.gbufferDescSet,  resources.descriptorSet };
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_COMPPipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
 			// Back-face culling with depth bias
 			vkCmdSetCullMode(cmd, VK_CULL_MODE_NONE);
@@ -233,16 +251,16 @@ void DDGIRasterizer::onRender(VkCommandBuffer cmd, Resources& resources)
 			
 		}
 		
-
+	
 		vkCmdEndRendering(cmd);
 		nvvk::cmdImageMemoryBarrier(cmd, { resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::epos), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
 		nvvk::cmdImageMemoryBarrier(cmd, { resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::enorm), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
 		nvvk::cmdImageMemoryBarrier(cmd, { resources.gBuffersDefer.getColorImage((uint32_t)Resources::EGbuffer::euv), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
-
+	
 		nvvk::cmdImageMemoryBarrier(cmd, { resources.gBuffers.getColorImage(Resources::eImgRendered), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,  VK_IMAGE_LAYOUT_GENERAL });
-
-
-		}
+	
+	
+	}
 
 }
 
@@ -374,8 +392,8 @@ void DDGIRasterizer::createPipeline(Resources& resources)
 	}
 	{
 		// for COMP
-		std::vector<VkDescriptorSetLayout> descriptorSetLayouts{ resources.descriptorSetLayout[0], resources.gbufferDescSetlayout };
-
+		// std::vector<VkDescriptorSetLayout> descriptorSetLayouts{ resources.descriptorSetLayout[0], resources.gbufferDescSetlayout };
+		std::vector<VkDescriptorSetLayout> descriptorSetLayouts{ resources.gbufferDescSetlayout , resources.descriptorSetLayout[0] };
 		// Push constant is used to pass data to the shader at each frame
 		const VkPushConstantRange pushConstantRange{
 			.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS, .offset = 0, .size = sizeof(shaderio::RasterPushConstant) };
@@ -478,7 +496,7 @@ void DDGIRasterizer::compileShader(Resources& resources, bool fromFile)
 	}
 
 	{
-		std::vector<VkDescriptorSetLayout> descriptorSetLayouts{ resources.descriptorSetLayout[0], resources.gbufferDescSetlayout };
+		std::vector<VkDescriptorSetLayout> descriptorSetLayouts{ resources.gbufferDescSetlayout,  resources.descriptorSetLayout[0] };
 
 		VkShaderCreateInfoEXT shaderInfo{
 			.sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,

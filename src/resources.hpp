@@ -144,9 +144,7 @@ struct Resources
       nvvk::Image               gBufferDepth{};
       std::vector<VkImageView>  imageViews{};
       VkSampler                 sampler;
-      VkExtent2D                size{};
-
-      
+      VkExtent2D                size{}; 
   }gres;
   VkDescriptorSetLayout gbufferDescSetlayout{};
   VkDescriptorSet gbufferDescSet{};

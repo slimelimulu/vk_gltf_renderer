@@ -831,6 +831,58 @@ void GltfRenderer::compileShaders()
   }
 }
 
+// 创建imageview:
+VkImageView createImageViewForGbuffer(const VkImage& image, const VkDevice& device) {
+    VkImageViewCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    createInfo.image = image;
+    createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    createInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    createInfo.components.r = VK_COMPONENT_SWIZZLE_R;
+    createInfo.components.g = VK_COMPONENT_SWIZZLE_G;
+    createInfo.components.b = VK_COMPONENT_SWIZZLE_B;
+    createInfo.components.a = VK_COMPONENT_SWIZZLE_A;
+    createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    createInfo.subresourceRange.baseMipLevel = 0;
+    createInfo.subresourceRange.levelCount = 1;
+    createInfo.subresourceRange.baseArrayLayer = 0;
+    createInfo.subresourceRange.layerCount = 1;
+    VkImageView imageView;
+    if(vkCreateImageView(device, &createInfo, nullptr, &imageView) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create image views");
+    }
+    return imageView;
+        
+}
+
+VkSampler createSamplerforGbuffer(VkDevice device) {
+    VkSamplerCreateInfo samplerInfo = {};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_NEAREST;
+    samplerInfo.minFilter = VK_FILTER_NEAREST;;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.anisotropyEnable = VK_TRUE;
+    samplerInfo.maxAnisotropy = 16;
+    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.mipLodBias = 0.0f;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = 0.0f;
+    VkSampler textureSampler;
+    if(vkCreateSampler(device, &samplerInfo, nullptr, &
+        textureSampler) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create a sampler");
+    }
+    return textureSampler;
+
+}
+
+
 //--------------------------------------------------------------------------------------------------
 // Update the textures: this is called when the scene is loaded
 // Textures are updated in the descriptor set (0)
@@ -851,24 +903,31 @@ void GltfRenderer::updateTextures()
     {
         // 转换后，需要写到descriptorSet里面
         std::vector<VkWriteDescriptorSet> writes{};
+        m_resources.gres.imageViews.clear();
+        m_resources.gres.sampler = createSamplerforGbuffer(m_device);
+        
+        std::array<VkDescriptorImageInfo, 3> imageinfos;
         for (uint32_t i = 0; i < 3; i++) {
-            VkDescriptorImageInfo imageinfo = {
-                .sampler = m_resources.gBuffersDefer.getDescriptorImageInfo(i).sampler,
-                .imageView = m_resources.gBuffersDefer.getColorImageView(i),
+            VkImageView& imageView = m_resources.gres.imageViews.emplace_back();
+            imageView = createImageViewForGbuffer(m_resources.gBuffersDefer.getColorImage(i), m_device);
+            imageinfos[i] = {
+                .sampler = m_resources.gres.sampler,
+                .imageView = imageView,
                 .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             };
-            VkWriteDescriptorSet write{
-                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .pNext = nullptr,
-                .dstSet = m_resources.gbufferDescSet,
-                .dstBinding = i,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .pImageInfo = &imageinfo,
-                .pBufferInfo = nullptr,
-                .pTexelBufferView = nullptr
-            };
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.pNext = nullptr;
+            write.dstSet = m_resources.gbufferDescSet;
+            write.dstBinding = i;
+            write.dstArrayElement = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo = &imageinfos[i];
+            write.pBufferInfo = nullptr;
+            write.pTexelBufferView = nullptr;
+
+            writes.push_back(write);
         }
         
         vkUpdateDescriptorSets(m_device, writes.size(), writes.data(), 0, nullptr);
